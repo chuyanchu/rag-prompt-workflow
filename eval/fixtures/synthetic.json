@@ -57,6 +57,43 @@
         "constraints": ["只基于原文", "保留原文证据句", "输出前自检", "不确定时标记待确认"],
         "extra_instructions": "不要输出推理过程；没有证据时输出 null。"
       }
+    },
+    {
+      "id": "synthetic-semantic-boundaries",
+      "label": "Synthetic: semantic boundary decisions",
+      "sensitivity": "synthetic",
+      "workflow": "synonym_merge",
+      "sourceMode": "generic",
+      "prompt": "判断 high temperature alloy、yield strength、tensile strength、strength loss ratio、yield strength value、pre-strain rate、test temperature 是否可以合并，并明确相关但不合并项。",
+      "requiredTerms": [
+        "high temperature alloy",
+        "yield strength",
+        "tensile strength",
+        "strength loss ratio",
+        "yield strength value",
+        "pre-strain rate",
+        "test temperature"
+      ],
+      "forbiddenMergeTerms": ["high temperature alloy", "strength loss ratio", "yield strength value", "pre-strain rate", "test temperature"],
+      "requiredEvidenceTypes": ["category_type_conflict", "semantic_boundary_conflict", "metric_type_conflict", "related_only"],
+      "answers": {
+        "target_type": "抽取字段标准化",
+        "candidate_terms": [
+          "high temperature alloy",
+          "yield strength",
+          "tensile strength",
+          "strength loss ratio",
+          "yield strength value",
+          "pre-strain rate",
+          "test temperature"
+        ],
+        "bilingual_synonym": "yes",
+        "synonym_groups": [],
+        "merge_policy": "严格合并",
+        "output_format": "JSON 数组",
+        "constraints": ["知识来源", "证据原文", "关系类型", "置信度", "不合并原因"],
+        "extra_instructions": "材料名、性能指标、测量结果和试验条件必须分开；yield strength 与 tensile strength 仅相关但不自动合并。"
+      }
     }
   ]
 }

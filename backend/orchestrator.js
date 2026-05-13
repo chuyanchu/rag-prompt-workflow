@@ -119,7 +119,7 @@ function classifyEvidence({ evidenceType = "llm_inferred", grade = "" } = {}) {
   if (["excel_includes_parameter", "dictionary_alias", "dictionary_see_also"].includes(evidenceType)) return "A";
   if (["bilingual_alias", "abbreviation"].includes(evidenceType)) return "B";
   if (["related_only"].includes(evidenceType)) return "C";
-  if (["field_type_conflict", "metric_type_conflict"].includes(evidenceType)) return "D";
+  if (["field_type_conflict", "metric_type_conflict", "semantic_boundary_conflict", "category_type_conflict"].includes(evidenceType)) return "D";
   return "B";
 }
 
@@ -180,6 +180,215 @@ function buildFieldConflictOptions(terms, normalizeAlias) {
         evidenceType,
         grade: "D",
         evidenceText,
+        disabled: true,
+        autoSelect: false,
+      };
+      options.push({
+        value: makeSynonymValue(group),
+        label: `${left.term}: ${right.term}`,
+        description: makeSynonymDescription(group),
+        grade: group.grade,
+        evidenceType: group.evidenceType,
+        autoSelect: false,
+        disabled: true,
+      });
+    }
+  }
+
+  return options;
+}
+
+const TERM_CONCEPT_PATTERNS = [
+  {
+    id: "material",
+    label: "材料或材料类别",
+    patterns: [
+      /alloy|steel|glass|polymer|ceramic|composite|superalloy|foam glass|porous glass/i,
+      /材料|合金|钢|玻璃|陶瓷|复合材料|高温合金|泡沫玻璃|多孔玻璃|塑料/,
+    ],
+  },
+  {
+    id: "performance",
+    label: "性能指标",
+    patterns: [
+      /strength|hardness|ductility|toughness|elongation|fatigue|stiffness|performance|load-bearing/i,
+      /性能|强度|屈服|抗拉|硬度|韧性|延性|伸长率|疲劳|刚度|承载/,
+    ],
+  },
+  {
+    id: "test_condition",
+    label: "试验条件",
+    patterns: [
+      /test condition|temperature|duration|pressure|environment|pre-strain|strain rate|charging|hydrogen concentration/i,
+      /试验条件|测试条件|温度|时间|压力|环境|预应变|应变速率|加载|充氢|氢浓度/,
+    ],
+  },
+  {
+    id: "measurement_result",
+    label: "测量结果",
+    patterns: [/value|ratio|rate|loss|result|percentage|iuts|potential/i, /数值|值|比例|速率|损失|结果|百分比|电位/],
+  },
+];
+
+const TERM_FAMILY_PATTERNS = [
+  { id: "strength", label: "强度类性能", patterns: [/strength/i, /强度|屈服|抗拉/] },
+  { id: "corrosion", label: "腐蚀类指标", patterns: [/corrosion/i, /腐蚀|点蚀|缝隙腐蚀/] },
+  { id: "hydrogen", label: "氢脆/充氢相关", patterns: [/hydrogen|embrittlement/i, /氢|氢脆|充氢/] },
+  { id: "strain", label: "应变相关", patterns: [/strain/i, /应变/] },
+  { id: "temperature", label: "温度相关", patterns: [/temperature/i, /温度/] },
+];
+
+function matchesAnyPattern(text, patterns) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function analyzeTerm(term) {
+  const value = String(term || "").trim();
+  const lower = value.toLowerCase();
+  const fieldTyped = splitFieldTypedTerm(value);
+  const concepts = new Set();
+  const families = new Set();
+
+  TERM_CONCEPT_PATTERNS.forEach((concept) => {
+    if (matchesAnyPattern(value, concept.patterns)) concepts.add(concept.id);
+  });
+  TERM_FAMILY_PATTERNS.forEach((family) => {
+    if (matchesAnyPattern(value, family.patterns)) families.add(family.id);
+  });
+  if (concepts.has("material") && concepts.has("test_condition") && !/test|condition|测试|试验|pre-strain|strain rate|charging|hydrogen concentration|预应变|应变速率|充氢|氢浓度/i.test(value)) {
+    concepts.delete("test_condition");
+  }
+
+  let metricKind = "";
+  if (/\bratio\b|percentage|iuts|损失率|比例|百分比/i.test(value)) metricKind = "ratio";
+  else if (/\brate\b|速率/i.test(value)) metricKind = "rate";
+  else if (/\bvalue\b|数值|值/i.test(value)) metricKind = "value";
+
+  const isStrengthLoss = /strength loss|loss of strength|reduction in strength|percentage loss|iuts|强度损失/i.test(lower);
+  const isStrengthMetric = /strength|强度|屈服|抗拉/i.test(value) && !isStrengthLoss;
+
+  return {
+    term: value,
+    lower,
+    fieldTyped,
+    concepts,
+    families,
+    metricKind,
+    isStrengthLoss,
+    isStrengthMetric,
+  };
+}
+
+function hasConcept(analysis, concept) {
+  return analysis.concepts.has(concept);
+}
+
+function getSharedFamily(left, right) {
+  for (const family of left.families) {
+    if (right.families.has(family)) {
+      return TERM_FAMILY_PATTERNS.find((item) => item.id === family)?.label || family;
+    }
+  }
+  return "";
+}
+
+function getSemanticDecision(left, right) {
+  if ((left.isStrengthLoss && right.isStrengthMetric) || (right.isStrengthLoss && left.isStrengthMetric)) {
+    return {
+      grade: "D",
+      evidenceType: "semantic_boundary_conflict",
+      evidenceText: "强度损失率描述强度下降比例或损失程度，强度值描述材料性能数值，二者不能合并。",
+    };
+  }
+
+  if (
+    left.metricKind &&
+    right.metricKind &&
+    left.metricKind !== right.metricKind &&
+    ["ratio", "rate", "value"].includes(left.metricKind) &&
+    ["ratio", "rate", "value"].includes(right.metricKind)
+  ) {
+    return {
+      grade: "D",
+      evidenceType: "metric_type_conflict",
+      evidenceText: `${left.metricKind} 与 ${right.metricKind} 属于不同指标类型，不能直接合并。`,
+    };
+  }
+
+  if (
+    (hasConcept(left, "material") && (hasConcept(right, "performance") || hasConcept(right, "measurement_result") || hasConcept(right, "test_condition"))) ||
+    (hasConcept(right, "material") && (hasConcept(left, "performance") || hasConcept(left, "measurement_result") || hasConcept(left, "test_condition")))
+  ) {
+    return {
+      grade: "D",
+      evidenceType: "category_type_conflict",
+      evidenceText: "材料名或材料类别与性能指标、测量结果或试验条件属于不同信息类型，不能合并为同义词。",
+    };
+  }
+
+  if (
+    (hasConcept(left, "test_condition") && (hasConcept(right, "measurement_result") || hasConcept(right, "performance"))) ||
+    (hasConcept(right, "test_condition") && (hasConcept(left, "measurement_result") || hasConcept(left, "performance")))
+  ) {
+    return {
+      grade: "D",
+      evidenceType: "category_type_conflict",
+      evidenceText: "试验条件描述实验输入或环境，测量结果/性能指标描述输出结果，不能合并。",
+    };
+  }
+
+  const sharedFamily = getSharedFamily(left, right);
+  if (sharedFamily) {
+    return {
+      grade: "C",
+      evidenceType: "related_only",
+      evidenceText: `二者同属${sharedFamily}，但缺少同义、别名或符号等价证据，只能标记为相关术语。`,
+    };
+  }
+
+  return null;
+}
+
+function getExistingPairKeys(options, normalizeAlias) {
+  const keys = new Set();
+  options.forEach((option) => {
+    const [, relation = ""] = String(option.value || "").split("|");
+    const [canonical, aliasesText = ""] = relation.split("=>").map((item) => item.trim());
+    aliasesText
+      .split(/\s*\/\s*/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((alias) => {
+        const pairKey = [normalizeAlias(canonical), normalizeAlias(alias)].sort().join("|");
+        if (pairKey) keys.add(pairKey);
+      });
+  });
+  return keys;
+}
+
+function buildSemanticDecisionOptions(terms, normalizeAlias, existingOptions = []) {
+  const cleanTerms = [...new Set(terms.map((item) => String(item || "").trim()).filter(Boolean))];
+  const analyses = cleanTerms.map(analyzeTerm);
+  const options = [];
+  const seenPairs = getExistingPairKeys(existingOptions, normalizeAlias);
+
+  for (let leftIndex = 0; leftIndex < analyses.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < analyses.length; rightIndex += 1) {
+      const left = analyses[leftIndex];
+      const right = analyses[rightIndex];
+      const pairKey = [normalizeAlias(left.term), normalizeAlias(right.term)].sort().join("|");
+      if (!pairKey || seenPairs.has(pairKey)) continue;
+
+      const decision = getSemanticDecision(left, right);
+      if (!decision) continue;
+      seenPairs.add(pairKey);
+
+      const group = {
+        canonical: left.term,
+        aliases: [right.term],
+        evidenceType: decision.evidenceType,
+        grade: decision.grade,
+        evidenceText: decision.evidenceText,
         disabled: true,
         autoSelect: false,
       };
@@ -277,7 +486,10 @@ function withExplicitCandidateTerms(questions, prompt, knowledgeProfile) {
 }
 
 function normalizeKnowledgeLine(line) {
-  return String(line || "").replace(/^[\s\-*+•·\d.、)）]+/, "").trim();
+  return String(line || "")
+    .replace(/^[\s\-*+•·\d.、)）]+/, "")
+    .replace(/^(?:内容|text)[：:]\s*/i, "")
+    .trim();
 }
 
 function parseKnowledgeProfile(text, scenario) {
@@ -474,6 +686,7 @@ function getSynonymOptions(terms, knowledgeProfile) {
   });
 
   options.push(...buildFieldConflictOptions(terms, normalizeAlias));
+  options.push(...buildSemanticDecisionOptions(terms, normalizeAlias, options));
 
   return options;
 }
@@ -804,6 +1017,7 @@ function getSynonymEvidenceSummary(session) {
     const text = String(value);
     return (
       optionByValue.get(text) ||
+      options.find((option) => !option.disabled && (String(option.value).includes(`${text} =>`) || String(option.label).startsWith(`${text}:`))) ||
       options.find((option) => String(option.value).includes(`${text} =>`) || String(option.label).startsWith(`${text}:`)) ||
       text
     );

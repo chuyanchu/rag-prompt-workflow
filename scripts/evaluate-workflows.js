@@ -204,6 +204,7 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const promptText = String(finalPrompt || "");
   const required = fixture.requiredTerms || [];
   const forbidden = fixture.forbiddenMergeTerms || [];
+  const requiredEvidenceTypes = fixture.requiredEvidenceTypes || [];
 
   function aliases(term) {
     const table = {
@@ -223,6 +224,7 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const questionHits = required.filter((term) => includesTerm(candidateText, term));
   const promptHits = required.filter((term) => includesTerm(promptText, term));
   const forbiddenMentioned = forbidden.filter((term) => promptText.toLowerCase().includes(term.toLowerCase()));
+  const evidenceTypeHits = requiredEvidenceTypes.filter((item) => promptText.toLowerCase().includes(String(item).toLowerCase()));
   const hasNoMergeLanguage = /不能合并|不得.*合并|严禁.*合并|禁止.*合并|不应合并|独立概念|not merge|must not/i.test(
     promptText
   );
@@ -230,8 +232,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const retrievalScore = fixture.sourceMode === "rag" ? retrievalHits.length / Math.max(required.length, 1) : 1;
   const questionScore = questionHits.length / Math.max(required.length, 1);
   const promptScore = promptHits.length / Math.max(required.length, 1);
-  const boundaryScore = forbidden.length ? (forbiddenMentioned.length && hasNoMergeLanguage ? 1 : 0) : 1;
-  const total = Math.round(((retrievalScore + questionScore + promptScore + boundaryScore) / 4) * 100);
+  const boundaryScore = forbidden.length ? (forbiddenMentioned.length / forbidden.length) * (hasNoMergeLanguage ? 1 : 0) : 1;
+  const evidenceScore = requiredEvidenceTypes.length ? evidenceTypeHits.length / requiredEvidenceTypes.length : 1;
+  const total = Math.round(((retrievalScore + questionScore + promptScore + boundaryScore + evidenceScore) / 5) * 100);
 
   return {
     total,
@@ -243,7 +246,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
     questionHits,
     promptHits,
     forbiddenMentioned,
+    evidenceTypeHits,
     hasNoMergeLanguage,
+    evidenceScore,
   };
 }
 
@@ -290,13 +295,13 @@ function renderMarkdown(results, args) {
     "",
     "## 汇总",
     "",
-    "| 用例 | 模式 | 分数 | 召回 | 问题候选 | 最终提示词 | 边界 |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    "| 用例 | 模式 | 分数 | 召回 | 问题候选 | 最终提示词 | 边界 | 证据 |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
 
   for (const item of results) {
     lines.push(
-      `| ${item.label} | ${item.mode} | ${item.score.total} | ${item.score.retrievalScore.toFixed(2)} | ${item.score.questionScore.toFixed(2)} | ${item.score.promptScore.toFixed(2)} | ${item.score.boundaryScore.toFixed(2)} |`
+      `| ${item.label} | ${item.mode} | ${item.score.total} | ${item.score.retrievalScore.toFixed(2)} | ${item.score.questionScore.toFixed(2)} | ${item.score.promptScore.toFixed(2)} | ${item.score.boundaryScore.toFixed(2)} | ${item.score.evidenceScore.toFixed(2)} |`
     );
   }
 
@@ -313,6 +318,7 @@ function renderMarkdown(results, args) {
       `- Required in questions：${item.score.questionHits.join("；") || "无"}`,
       `- Required in final prompt：${item.score.promptHits.join("；") || "无"}`,
       `- Forbidden boundary mentioned：${item.score.forbiddenMentioned.join("；") || "无"}`,
+      `- Evidence type hits：${item.score.evidenceTypeHits.join("；") || "无"}`,
       "",
       "Final prompt preview:",
       "",

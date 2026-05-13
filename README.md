@@ -186,6 +186,25 @@ node scripts/evaluate-workflows.js --fixtures synthetic --allow-remote-llm
 
 GitHub Actions 配置位于 [.github/workflows/ci.yml](/Users/cyc/Desktop/相关文档/00-项目/szlab/RAG智能体问答系统/.github/workflows/ci.yml)。每次 push 到 `main` 或创建 PR 时，会自动运行 `npm run review`。
 
+## 同义词合并决策
+
+同义词确认步骤会按证据等级输出四类关系：
+
+- `A`：知识库强证据，可自动合并，例如 Excel `涵盖参数`、词典 `又称`、`见/参见`。
+- `B`：内置词典或缩写建议合并，需要保留证据。
+- `C`：相关但不合并，例如 `yield strength` 与 `tensile strength` 同属强度类性能，但缺少同义证据。
+- `D`：禁止合并，例如字段类型冲突、材料名 vs 性能指标、试验条件 vs 测量结果、强度值 vs 强度损失率。
+
+当前内置边界规则包括：
+
+- `name / value / unit / ratio / rate` 等同基字段类型冲突。
+- `strength` 与 `strength loss / reduction in strength / IUTS` 等语义边界冲突。
+- `ratio / rate / value` 等指标类型冲突。
+- 材料名或材料类别与性能指标、测量结果、试验条件冲突。
+- 试验条件与测量结果/性能指标冲突。
+
+最终提示词会分区列出“自动/确认合并项”“相关但不合并项”“禁止合并项”，并保留 `evidenceType` 和证据说明。黄金评测集会检查关键证据类型是否出现在最终提示词中。
+
 Web 应用启动后会暴露知识库接口：
 
 ```bash
