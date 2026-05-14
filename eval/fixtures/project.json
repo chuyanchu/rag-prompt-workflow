@@ -10,6 +10,8 @@
       "prompt": "合并 yield strength、YS、σ0.2、Rp0.2 的同义词项，并说明 yield strength value 与 yield strength name 是否能合并。",
       "requiredTerms": ["yield strength", "YS", "σ0.2", "Rp0.2"],
       "forbiddenMergeTerms": ["yield strength value"],
+      "requiredEvidenceTypes": ["excel_includes_parameter", "field_type_conflict"],
+      "requiredPromptPhrases": ["yield strength name =>", "决策：自动合并", "关系类型：字段涵盖参数"],
       "knowledgeResults": [
         {
           "title": "氢脆 Excel / yield strength name",
@@ -80,6 +82,8 @@
       "prompt": "判断泡沫玻璃和多孔玻璃是否可以作为同义词合并，并保留词典证据。",
       "requiredTerms": ["泡沫玻璃", "多孔玻璃"],
       "forbiddenMergeTerms": ["泡沫塑料"],
+      "requiredEvidenceTypes": ["dictionary_alias", "category_type_conflict"],
+      "requiredPromptPhrases": ["泡沫玻璃 => 多孔玻璃", "决策：自动合并", "关系类型：词典又称"],
       "knowledgeResults": [
         {
           "title": "材料大辞典 / 泡沫玻璃",

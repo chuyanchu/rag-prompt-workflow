@@ -101,14 +101,38 @@ const EVIDENCE_GRADE = {
   D: "D 级：禁止合并",
 };
 
+const EVIDENCE_DECISION_MATRIX = {
+  excel_includes_parameter: { grade: "A", action: "自动合并", relationType: "字段涵盖参数" },
+  dictionary_alias: { grade: "A", action: "自动合并", relationType: "词典又称" },
+  dictionary_see_also: { grade: "A", action: "自动合并", relationType: "词典见/参见" },
+  exact_alias: { grade: "A", action: "自动合并", relationType: "精确别名" },
+  standard_equivalent: { grade: "A", action: "自动合并", relationType: "标准等价术语" },
+  bilingual_alias: { grade: "B", action: "建议合并", relationType: "中英文别名" },
+  abbreviation: { grade: "B", action: "建议合并", relationType: "缩写/符号" },
+  symbol_alias: { grade: "B", action: "建议合并", relationType: "符号别名" },
+  llm_inferred: { grade: "B", action: "建议合并", relationType: "模型推断" },
+  related_only: { grade: "C", action: "相关但不合并", relationType: "同类相关" },
+  field_type_conflict: { grade: "D", action: "禁止合并", relationType: "字段类型冲突" },
+  metric_type_conflict: { grade: "D", action: "禁止合并", relationType: "指标类型冲突" },
+  semantic_boundary_conflict: { grade: "D", action: "禁止合并", relationType: "语义边界冲突" },
+  category_type_conflict: { grade: "D", action: "禁止合并", relationType: "信息类别冲突" },
+};
+
+function getEvidenceDecision(evidenceType = "llm_inferred") {
+  return EVIDENCE_DECISION_MATRIX[evidenceType] || EVIDENCE_DECISION_MATRIX.llm_inferred;
+}
+
 function makeSynonymValue(group) {
   return `${group.grade || "B"}|${group.canonical} => ${(group.aliases || []).join(" / ")}`;
 }
 
 function makeSynonymDescription(group) {
+  const decision = getEvidenceDecision(group.evidenceType);
   return [
     EVIDENCE_GRADE[group.grade] || EVIDENCE_GRADE.B,
     group.evidenceType ? `证据类型：${group.evidenceType}` : "",
+    decision.action ? `决策：${decision.action}` : "",
+    group.relationType || decision.relationType ? `关系类型：${group.relationType || decision.relationType}` : "",
     group.evidenceText ? `证据：${group.evidenceText}` : "",
   ]
     .filter(Boolean)
@@ -117,11 +141,42 @@ function makeSynonymDescription(group) {
 
 function classifyEvidence({ evidenceType = "llm_inferred", grade = "" } = {}) {
   if (grade) return grade;
-  if (["excel_includes_parameter", "dictionary_alias", "dictionary_see_also"].includes(evidenceType)) return "A";
-  if (["bilingual_alias", "abbreviation"].includes(evidenceType)) return "B";
-  if (["related_only"].includes(evidenceType)) return "C";
-  if (["field_type_conflict", "metric_type_conflict", "semantic_boundary_conflict", "category_type_conflict"].includes(evidenceType)) return "D";
-  return "B";
+  return getEvidenceDecision(evidenceType).grade;
+}
+
+function isLikelyAbbreviation(value) {
+  const text = String(value || "").trim();
+  return /^[A-Z]{2,8}$/.test(text) || /^[σγ][A-Za-z0-9_.′'’\-]{1,12}$/.test(text) || /^[A-Z][A-Za-z]?[0-9.]{1,8}$/.test(text);
+}
+
+function canonicalPriority(value, evidenceType = "") {
+  const text = String(value || "").trim();
+  if (!text) return -100;
+  let score = Math.min(text.length, 36) * 0.05;
+  if (/[\u4e00-\u9fff]/.test(text)) score += 3;
+  if (/\bname\b$/i.test(text)) score += 2.5;
+  if (/\b(value|unit|ratio|rate)\b$/i.test(text)) score += 1.2;
+  if (/\s/.test(text)) score += 1;
+  if (/^[A-Za-z][A-Za-z\s\-]+$/.test(text) && text.length > 8) score += 0.8;
+  if (isLikelyAbbreviation(text)) score -= 4;
+  if (evidenceType === "excel_includes_parameter") score += 1;
+  return score;
+}
+
+function chooseCanonicalTerm(canonical, aliases, evidenceType = "") {
+  const candidates = [canonical, ...(aliases || [])]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (!candidates.length) return { canonical: "", aliases: [] };
+
+  const selected = candidates
+    .map((term, index) => ({ term, index, score: canonicalPriority(term, evidenceType) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)[0].term;
+  const selectedKey = selected.toLowerCase();
+  return {
+    canonical: selected,
+    aliases: [...new Set(candidates.filter((item) => item.toLowerCase() !== selectedKey))],
+  };
 }
 
 const FIELD_TYPE_SUFFIXES = ["name", "value", "unit", "ratio", "rate"];
@@ -493,6 +548,17 @@ function normalizeKnowledgeLine(line) {
     .trim();
 }
 
+function cleanBoundaryTerm(value) {
+  return String(value || "")
+    .replace(/^(?:定义|术语|字段)[：:]\s*/, "")
+    .replace(/^(?:又称|见|参见)\s*/, "")
+    .replace(/(?:直接|作为同义词|作为同义词项)?$/, "")
+    .split(/[为是属于]/)[0]
+    .trim()
+    .replace(/[，,。；;：:]+$/, "")
+    .trim();
+}
+
 function parseKnowledgeProfile(text, scenario) {
   const library = GENERIC_LIBRARY[scenario.domainKey];
   const synonyms = {};
@@ -501,18 +567,19 @@ function parseKnowledgeProfile(text, scenario) {
   let currentFieldName = "";
 
   function addSynonymGroup(canonical, aliases, evidence = {}) {
-    const cleanCanonical = String(canonical || "").trim();
-    const cleanAliases = [...new Set((aliases || []).map((item) => String(item || "").trim()).filter(Boolean))].filter(
-      (item) => item !== cleanCanonical
-    );
-    if (!cleanCanonical || !cleanAliases.length) return;
     const evidenceType = evidence.evidenceType || "llm_inferred";
+    const selectedTerms = chooseCanonicalTerm(canonical, aliases, evidenceType);
+    const cleanCanonical = selectedTerms.canonical;
+    const cleanAliases = selectedTerms.aliases;
+    if (!cleanCanonical || !cleanAliases.length) return;
     const grade = classifyEvidence({ evidenceType, grade: evidence.grade });
+    const decision = getEvidenceDecision(evidenceType);
     synonymGroups.push({
       canonical: cleanCanonical,
       aliases: cleanAliases,
       evidenceType,
       grade,
+      relationType: evidence.relationType || decision.relationType,
       evidenceText: evidence.evidenceText || "",
       autoSelect: grade === "A",
       disabled: grade === "C" || grade === "D",
@@ -522,6 +589,20 @@ function parseKnowledgeProfile(text, scenario) {
     cleanAliases.forEach((alias) => {
       terms.push(alias);
       synonyms[alias] = [...new Set([cleanCanonical, ...(synonyms[alias] || []), ...cleanAliases.filter((item) => item !== alias)])];
+    });
+  }
+
+  function addForbiddenBoundaryGroups(item) {
+    const boundaryMatch = String(item || "").match(/([^。；;，,]{2,60}?)(?:为[^，。；;]*)?[，,]?\s*不能与\s*([^。；;，,]{2,60}?)(?:直接)?合并/);
+    if (!boundaryMatch) return;
+    const left = cleanBoundaryTerm(boundaryMatch[1]);
+    const right = cleanBoundaryTerm(boundaryMatch[2]);
+    if (!left || !right || left === right) return;
+    addSynonymGroup(right, [left], {
+      evidenceType: "category_type_conflict",
+      grade: "D",
+      evidenceText: item,
+      relationType: "知识片段禁止合并",
     });
   }
 
@@ -568,6 +649,7 @@ function parseKnowledgeProfile(text, scenario) {
           evidenceType: "dictionary_alias",
           evidenceText: item,
         });
+        addForbiddenBoundaryGroups(item);
         return;
       }
 
@@ -577,8 +659,11 @@ function parseKnowledgeProfile(text, scenario) {
           evidenceType: "dictionary_see_also",
           evidenceText: item,
         });
+        addForbiddenBoundaryGroups(item);
         return;
       }
+
+      addForbiddenBoundaryGroups(item);
 
       if (item.includes("：") || item.includes(":")) return;
 
@@ -641,13 +726,15 @@ function getSynonymOptions(terms, knowledgeProfile) {
     const members = [canonical, ...aliases];
     const memberKeys = members.map(normalizeAlias).filter(Boolean);
     if (!memberKeys.some((key) => selectedKeys.has(key))) return;
-    if (memberKeys.some((key) => usedKeys.has(key))) return;
+    if (!["C", "D"].includes(group.grade) && memberKeys.some((key) => usedKeys.has(key))) return;
 
     const canonicalKey = normalizeAlias(canonical);
     const related = [...new Set(aliases)].filter((item) => normalizeAlias(item) && normalizeAlias(item) !== canonicalKey);
     if (!canonicalKey || !related.length) return;
 
-    memberKeys.forEach((key) => usedKeys.add(key));
+    if (!["C", "D"].includes(group.grade)) {
+      memberKeys.forEach((key) => usedKeys.add(key));
+    }
     options.push({
       value: makeSynonymValue(group),
       label: `${canonical}: ${related.join(" / ")}`,
@@ -668,11 +755,13 @@ function getSynonymOptions(terms, knowledgeProfile) {
     );
     if (!related.length) return;
     [term, ...related].map(normalizeAlias).filter(Boolean).forEach((key) => usedKeys.add(key));
+    const selectedTerms = chooseCanonicalTerm(term, related, "bilingual_alias");
     const group = {
-      canonical: term,
-      aliases: related,
+      canonical: selectedTerms.canonical,
+      aliases: selectedTerms.aliases,
       evidenceType: "bilingual_alias",
       grade: "B",
+      relationType: getEvidenceDecision("bilingual_alias").relationType,
       evidenceText: "内置通用术语词典",
     };
     options.push({
