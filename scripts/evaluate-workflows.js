@@ -174,10 +174,13 @@ async function runWorkflow(baseUrl, fixture, knowledge, useRemote) {
   });
 
   const initialQuestions = session.questions || [];
+  const autoAnswers = session.autoAnswers || {};
+  const askedQuestionIds = [];
   let guard = 0;
   while (session.currentQuestion && guard < 30) {
     guard += 1;
     const question = session.currentQuestion;
+    askedQuestionIds.push(question.id);
     session = await postJson(baseUrl, `/api/orchestrator/sessions/${session.id}/answers`, {
       questionId: question.id,
       answer: answerFor(question, fixture),
@@ -190,7 +193,7 @@ async function runWorkflow(baseUrl, fixture, knowledge, useRemote) {
     promptMode: useRemote ? "llm" : "local",
     model: "qwen3.6-plus",
   });
-  return { session, initialQuestions };
+  return { session, initialQuestions, autoAnswers, askedQuestionIds };
 }
 
 function questionOptionText(questions, id) {
@@ -198,7 +201,7 @@ function questionOptionText(questions, id) {
   return (question?.options || []).map((option) => option.label || option.value || "").join("\n");
 }
 
-function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
+function scoreFixture(fixture, knowledgeResults, questions, finalPrompt, workflowTrace = {}) {
   const searchableKnowledge = knowledgeResults.map((item) => `${item.title || ""}\n${item.text || ""}`).join("\n");
   const candidateText = questionOptionText(questions, "candidate_terms");
   const promptText = String(finalPrompt || "");
@@ -207,6 +210,11 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const requiredEvidenceTypes = fixture.requiredEvidenceTypes || [];
   const requiredPromptPhrases = fixture.requiredPromptPhrases || [];
   const requiredQuestionIds = fixture.requiredQuestionIds || [];
+  const requiredAutoAnsweredIds = fixture.requiredAutoAnsweredIds || [];
+  const forbiddenAskedQuestionIds = fixture.forbiddenAskedQuestionIds || [];
+  const maxAskedQuestions = Number.isFinite(fixture.maxAskedQuestions) ? fixture.maxAskedQuestions : 0;
+  const askedQuestionIds = workflowTrace.askedQuestionIds || [];
+  const autoAnswers = workflowTrace.autoAnswers || {};
 
   function aliases(term) {
     const table = {
@@ -230,6 +238,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const promptPhraseHits = requiredPromptPhrases.filter((item) => promptText.toLowerCase().includes(String(item).toLowerCase()));
   const questionIds = new Set(questions.map((question) => question.id));
   const questionIdHits = requiredQuestionIds.filter((item) => questionIds.has(item));
+  const autoAnsweredIds = Object.keys(autoAnswers);
+  const autoAnsweredHits = requiredAutoAnsweredIds.filter((item) => Object.prototype.hasOwnProperty.call(autoAnswers, item));
+  const forbiddenAskedHits = forbiddenAskedQuestionIds.filter((item) => askedQuestionIds.includes(item));
   const hasNoMergeLanguage = /不能合并|不得.*合并|严禁.*合并|禁止.*合并|不应合并|独立概念|not merge|must not/i.test(
     promptText
   );
@@ -241,6 +252,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const evidenceScore = requiredEvidenceTypes.length ? evidenceTypeHits.length / requiredEvidenceTypes.length : 1;
   const promptPhraseScore = requiredPromptPhrases.length ? promptPhraseHits.length / requiredPromptPhrases.length : 1;
   const questionIdScore = requiredQuestionIds.length ? questionIdHits.length / requiredQuestionIds.length : 1;
+  const autoAnsweredScore = requiredAutoAnsweredIds.length ? autoAnsweredHits.length / requiredAutoAnsweredIds.length : 1;
+  const forbiddenAskedScore = forbiddenAskedQuestionIds.length ? (forbiddenAskedHits.length ? 0 : 1) : 1;
+  const askedCountScore = maxAskedQuestions ? (askedQuestionIds.length <= maxAskedQuestions ? 1 : maxAskedQuestions / askedQuestionIds.length) : 1;
   const scoreDimensions = [
     ["retrieval", retrievalScore],
     ["question", questionScore],
@@ -250,6 +264,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   ];
   if (requiredPromptPhrases.length) scoreDimensions.push(["promptPhrase", promptPhraseScore]);
   if (requiredQuestionIds.length) scoreDimensions.push(["questionId", questionIdScore]);
+  if (requiredAutoAnsweredIds.length) scoreDimensions.push(["autoAnswered", autoAnsweredScore]);
+  if (forbiddenAskedQuestionIds.length) scoreDimensions.push(["forbiddenAsked", forbiddenAskedScore]);
+  if (maxAskedQuestions) scoreDimensions.push(["askedCount", askedCountScore]);
   const total = Math.round((scoreDimensions.reduce((sum, [, score]) => sum + score, 0) / scoreDimensions.length) * 100);
 
   const diagnostics = [];
@@ -260,6 +277,7 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   const missingEvidenceTypes = requiredEvidenceTypes.filter((item) => !evidenceTypeHits.includes(item));
   const missingPromptPhrases = requiredPromptPhrases.filter((item) => !promptPhraseHits.includes(item));
   const missingQuestionIds = requiredQuestionIds.filter((item) => !questionIdHits.includes(item));
+  const missingAutoAnsweredIds = requiredAutoAnsweredIds.filter((item) => !autoAnsweredHits.includes(item));
 
   if (missingRetrievalTerms.length && fixture.sourceMode === "rag") {
     diagnostics.push(`召回缺失：${missingRetrievalTerms.join("；")}`);
@@ -271,6 +289,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
   if (missingEvidenceTypes.length) diagnostics.push(`证据类型缺失：${missingEvidenceTypes.join("；")}`);
   if (missingPromptPhrases.length) diagnostics.push(`必需提示词短语缺失：${missingPromptPhrases.join("；")}`);
   if (missingQuestionIds.length) diagnostics.push(`必需问题缺失：${missingQuestionIds.join("；")}`);
+  if (missingAutoAnsweredIds.length) diagnostics.push(`自动回答缺失：${missingAutoAnsweredIds.join("；")}`);
+  if (forbiddenAskedHits.length) diagnostics.push(`低价值问题未跳过：${forbiddenAskedHits.join("；")}`);
+  if (maxAskedQuestions && askedQuestionIds.length > maxAskedQuestions) diagnostics.push(`实际提问过多：${askedQuestionIds.length} > ${maxAskedQuestions}`);
 
   return {
     total,
@@ -281,6 +302,9 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
     boundaryScore,
     promptPhraseScore,
     questionIdScore,
+    autoAnsweredScore,
+    forbiddenAskedScore,
+    askedCountScore,
     retrievalHits,
     questionHits,
     promptHits,
@@ -288,6 +312,10 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
     evidenceTypeHits,
     promptPhraseHits,
     questionIdHits,
+    autoAnsweredHits,
+    autoAnsweredIds,
+    askedQuestionIds,
+    forbiddenAskedHits,
     missingRetrievalTerms,
     missingQuestionTerms,
     missingPromptTerms,
@@ -295,6 +323,7 @@ function scoreFixture(fixture, knowledgeResults, questions, finalPrompt) {
     missingEvidenceTypes,
     missingPromptPhrases,
     missingQuestionIds,
+    missingAutoAnsweredIds,
     diagnostics,
     hasNoMergeLanguage,
     evidenceScore,
@@ -305,8 +334,8 @@ async function runOne(baseUrl, fixture, args) {
   const remoteAllowedForFixture =
     args.allowRemoteLlm && (fixture.sensitivity === "synthetic" || args.allowProjectRemote);
   const retrieval = await retrieveKnowledge(baseUrl, fixture, args);
-  const { session, initialQuestions } = await runWorkflow(baseUrl, fixture, retrieval.knowledge, remoteAllowedForFixture);
-  const score = scoreFixture(fixture, retrieval.results, initialQuestions, session.finalPrompt);
+  const { session, initialQuestions, autoAnswers, askedQuestionIds } = await runWorkflow(baseUrl, fixture, retrieval.knowledge, remoteAllowedForFixture);
+  const score = scoreFixture(fixture, retrieval.results, initialQuestions, session.finalPrompt, { autoAnswers, askedQuestionIds });
   return {
     id: fixture.id,
     label: fixture.label,
@@ -315,6 +344,8 @@ async function runOne(baseUrl, fixture, args) {
     mode: remoteAllowedForFixture ? "remote-llm" : "local-template",
     questionSource: session.questionSource,
     promptSource: session.promptSource,
+    autoAnswers,
+    askedQuestionIds,
     retrieval: {
       count: retrieval.results.length,
       errors: retrieval.errors,
@@ -365,6 +396,10 @@ function renderMarkdown(results, args) {
       evidenceTypeHits: [],
       promptPhraseHits: [],
       questionIdHits: [],
+      autoAnsweredHits: [],
+      autoAnsweredIds: [],
+      askedQuestionIds: [],
+      forbiddenAskedHits: [],
       diagnostics: [],
       ...item.score,
     };
@@ -383,6 +418,8 @@ function renderMarkdown(results, args) {
       `- Evidence type hits：${score.evidenceTypeHits.join("；") || "无"}`,
       `- Required prompt phrases：${score.promptPhraseHits.join("；") || "无"}`,
       `- Required question ids：${score.questionIdHits.join("；") || "无"}`,
+      `- Auto answered ids：${score.autoAnsweredIds.join("；") || "无"}`,
+      `- Asked question ids：${score.askedQuestionIds.join("；") || "无"}`,
       `- Diagnostics：${score.diagnostics.join("；") || "无"}`,
       "",
       "Final prompt preview:",

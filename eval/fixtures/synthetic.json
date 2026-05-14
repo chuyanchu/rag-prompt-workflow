@@ -140,6 +140,26 @@
         "constraints": ["知识来源", "证据原文", "关系类型", "置信度", "不合并原因", "人工复核标记"],
         "extra_instructions": "foam glass/porous glass 是材料术语；compressive strength 是性能指标；test temperature 是试验条件，三类不能合并。"
       }
+    },
+    {
+      "id": "synthetic-dynamic-question-pruning",
+      "label": "Synthetic: dynamic question pruning",
+      "sensitivity": "synthetic",
+      "workflow": "synonym_merge",
+      "sourceMode": "generic",
+      "prompt": "请做材料术语归一：严格合并 foam glass、porous glass，并保留证据原文、关系类型、不合并原因和人工复核标记；输出 JSON 数组。",
+      "requiredTerms": ["foam glass", "porous glass"],
+      "forbiddenMergeTerms": [],
+      "requiredAutoAnsweredIds": ["target_type", "merge_policy", "output_format", "constraints"],
+      "forbiddenAskedQuestionIds": ["target_type", "merge_policy", "output_format", "constraints"],
+      "maxAskedQuestions": 4,
+      "requiredPromptPhrases": ["材料术语归一", "严格合并", "JSON 数组", "证据原文", "关系类型", "不合并原因"],
+      "answers": {
+        "candidate_terms": ["foam glass", "porous glass"],
+        "bilingual_synonym": "yes",
+        "synonym_groups": [],
+        "extra_instructions": "无额外说明。"
+      }
     }
   ]
 }

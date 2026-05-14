@@ -1111,6 +1111,91 @@ function getDefaultCustomAnswers(questions) {
   return customAnswers;
 }
 
+function normalizeForInference(value) {
+  return String(value || "").toLowerCase().replace(/\s+/g, " ");
+}
+
+function optionValue(question, label) {
+  return (question?.options || []).find((option) => option.value === label || option.label === label)?.value || "";
+}
+
+function inferAutoAnswers({ prompt, workflow, questions }) {
+  const text = normalizeForInference(prompt);
+  const byId = new Map(questions.map((question) => [question.id, question]));
+  const autoAnswers = {};
+
+  function setAnswer(questionId, answer, reason) {
+    if (answer === "" || answer == null || (Array.isArray(answer) && !answer.length)) return;
+    autoAnswers[questionId] = { answer, reason };
+  }
+
+  const targetQuestion = byId.get("target_type");
+  if (targetQuestion) {
+    if (workflow === "synonym_merge") {
+      if (/材料|material|alloy|glass|foam glass|porous glass|术语归一/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "材料术语归一"), "原始需求已指向材料术语归一。");
+      } else if (/字段|field|column|抽取字段/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "抽取字段标准化"), "原始需求已指向字段标准化。");
+      } else if (/标准|规范|standard/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "标准/规范术语对齐"), "原始需求已指向标准术语对齐。");
+      } else if (/中英文|英文|缩写|符号|alias|abbreviation/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "中英文别名合并"), "原始需求已指向中英文别名合并。");
+      }
+    } else if (/抽取|extract|提取|信息抽取/.test(text)) {
+      setAnswer("target_type", optionValue(targetQuestion, "信息抽取") || optionValue(targetQuestion, "性能词条"), "原始需求已明确是抽取任务。");
+    } else if (/同义词|合并|归一|标准化/.test(text)) {
+      setAnswer("target_type", optionValue(targetQuestion, "同义词合并") || optionValue(targetQuestion, "术语标准化"), "原始需求已明确是术语合并/标准化任务。");
+    }
+  }
+
+  const outputQuestion = byId.get("output_format");
+  if (outputQuestion) {
+    if (/json\s*数组|json array/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "JSON 数组"), "原始需求已指定 JSON 数组。");
+    else if (/json\s*对象|json object/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "JSON 对象"), "原始需求已指定 JSON 对象。");
+    else if (/markdown\s*表格|markdown table/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "Markdown 表格"), "原始需求已指定 Markdown 表格。");
+    else if (/\bcsv\b/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "CSV 字段"), "原始需求已指定 CSV。");
+  }
+
+  const bilingualQuestion = byId.get("bilingual_synonym");
+  if (bilingualQuestion) {
+    if (/不需要.*(同义|归并|合并)|无需.*(同义|归并|合并)|不强制.*(同义|归并|合并)/.test(text)) {
+      setAnswer("bilingual_synonym", "no", "原始需求明确不需要同义词归并。");
+    } else if (/同义词|别名|中英文|英文|缩写|符号|归并|合并|alias|abbreviation/.test(text)) {
+      setAnswer("bilingual_synonym", "yes", "原始需求已要求同义词/别名处理。");
+    }
+  }
+
+  const mergePolicyQuestion = byId.get("merge_policy");
+  if (mergePolicyQuestion) {
+    if (/严格|只有明确|不得.*推断|不能.*推断/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "严格合并"), "原始需求已要求严格合并。");
+    } else if (/人工复核|待确认|复核/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "人工复核优先"), "原始需求已要求人工复核。");
+    } else if (/宽松|聚类|近义/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "宽松聚类"), "原始需求已允许宽松聚类。");
+    }
+  }
+
+  const constraintsQuestion = byId.get("constraints");
+  if (constraintsQuestion) {
+    const requested = (constraintsQuestion.options || [])
+      .filter((option) => {
+        const value = String(option.value || option.label || "");
+        if (text.includes(value.toLowerCase())) return true;
+        if (value === "保留原文证据句" && /证据句|原文证据|证据原文/.test(text)) return true;
+        if (value === "证据原文" && /证据句|原文证据|证据原文/.test(text)) return true;
+        if (value === "输出前自检" && /自检|检查/.test(text)) return true;
+        if (value === "不确定时标记待确认" && /不确定|待确认/.test(text)) return true;
+        if (value === "不合并原因" && /不合并原因|不能合并|禁止合并/.test(text)) return true;
+        return false;
+      })
+      .map((option) => option.value);
+    if (requested.length >= 2) setAnswer("constraints", [...new Set(requested)], "原始需求已明确多个执行约束。");
+  }
+
+  return autoAnswers;
+}
+
 function getAnswerWithCustom(session, questionId, type) {
   const answer = session.answers[questionId];
   const customItems = parseCustomItems(session.customAnswers[questionId]);
@@ -1172,9 +1257,23 @@ function refreshSynonymQuestion(session) {
 }
 
 function shouldSkipQuestion(session, question) {
-  if (!question || question.id !== "synonym_groups") return false;
+  if (!question) return false;
+  if (session.autoAnswers?.[question.id]) return true;
+  if (question.id !== "synonym_groups") return false;
   refreshSynonymQuestion(session);
   return getAnswerWithCustom(session, "bilingual_synonym", "boolean") === "no" || !question.options.length;
+}
+
+function clearSkippedQuestionAnswer(session, question) {
+  if (!question || session.autoAnswers?.[question.id]) return;
+  session.answers[question.id] = question.type === "multi" ? [] : "";
+}
+
+function moveToFirstUnskippedQuestion(session) {
+  session.currentIndex = 0;
+  while (session.currentIndex < session.questions.length - 1 && shouldSkipQuestion(session, session.questions[session.currentIndex])) {
+    session.currentIndex += 1;
+  }
 }
 
 function getCurrentQuestion(session) {
@@ -1186,7 +1285,7 @@ function advanceToNextQuestion(session) {
   while (session.currentIndex < session.questions.length - 1) {
     session.currentIndex += 1;
     if (!shouldSkipQuestion(session, session.questions[session.currentIndex])) return;
-    session.answers[session.questions[session.currentIndex].id] = [];
+    clearSkippedQuestionAnswer(session, session.questions[session.currentIndex]);
   }
 }
 
@@ -1386,6 +1485,7 @@ function serializeSession(session) {
     questions: session.questions,
     answers: session.answers,
     customAnswers: session.customAnswers,
+    autoAnswers: session.autoAnswers,
     refinements: session.refinements,
     finalPrompt: session.finalPrompt,
     createdAt: session.createdAt,
@@ -1458,6 +1558,11 @@ function createOrchestrator({ callLLM, defaultModel }) {
     }
 
     const now = new Date().toISOString();
+    const autoAnswers = inferAutoAnswers({ prompt, workflow, questions });
+    const answers = getDefaultAnswers(questions);
+    Object.entries(autoAnswers).forEach(([questionId, item]) => {
+      answers[questionId] = item.answer;
+    });
     const session = {
       id: crypto.randomUUID(),
       prompt,
@@ -1468,8 +1573,9 @@ function createOrchestrator({ callLLM, defaultModel }) {
       scenario,
       knowledgeProfile,
       questions,
-      answers: getDefaultAnswers(questions),
+      answers,
       customAnswers: getDefaultCustomAnswers(questions),
+      autoAnswers,
       currentIndex: 0,
       refinements: [],
       finalPrompt: "",
@@ -1478,6 +1584,7 @@ function createOrchestrator({ callLLM, defaultModel }) {
       createdAt: now,
       updatedAt: now,
     };
+    moveToFirstUnskippedQuestion(session);
     sessions.set(session.id, session);
     return serializeSession(session);
   }
