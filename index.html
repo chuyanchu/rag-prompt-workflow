@@ -34,6 +34,22 @@
           <div class="knowledge-card">
             <strong id="llmStatusTitle">正在检测后端</strong>
             <p id="llmStatusText">通过 server.js 启动后，可调用真实 OpenAI-compatible 模型。</p>
+            <div class="llm-config-form">
+              <label>
+                <span>接口地址</span>
+                <input id="llmBaseUrlInput" class="sidebar-input" type="url" placeholder="https://api.openai.com/v1" />
+              </label>
+              <label>
+                <span>API Key</span>
+                <input id="llmApiKeyInput" class="sidebar-input" type="password" placeholder="留空则保留当前 Key" autocomplete="off" />
+              </label>
+              <label class="remember-row">
+                <input id="rememberLlmConfigInput" type="checkbox" />
+                <span>记住到本机</span>
+              </label>
+              <button class="mini-btn" id="saveLlmConfigBtn" type="button">保存 API 设置</button>
+              <small id="llmConfigStatus">Key 只发送到本机后端，不会在页面回显。</small>
+            </div>
           </div>
         </section>
 

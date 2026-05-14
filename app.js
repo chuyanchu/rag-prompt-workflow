@@ -527,6 +527,11 @@ const elements = {
   modelSelect: document.querySelector("#modelSelect"),
   llmStatusTitle: document.querySelector("#llmStatusTitle"),
   llmStatusText: document.querySelector("#llmStatusText"),
+  llmBaseUrlInput: document.querySelector("#llmBaseUrlInput"),
+  llmApiKeyInput: document.querySelector("#llmApiKeyInput"),
+  rememberLlmConfigInput: document.querySelector("#rememberLlmConfigInput"),
+  saveLlmConfigBtn: document.querySelector("#saveLlmConfigBtn"),
+  llmConfigStatus: document.querySelector("#llmConfigStatus"),
   generateBtn: document.querySelector("#generateBtn"),
   llmGenerateBtn: document.querySelector("#llmGenerateBtn"),
   resetBtn: document.querySelector("#resetBtn"),
@@ -612,6 +617,61 @@ function ensureModelOption(model) {
   }
   elements.modelSelect.value = model;
   state.model = model;
+}
+
+function syncLLMConfigForm(config) {
+  const llm = config?.llm || config || {};
+  if (llm.baseUrl) elements.llmBaseUrlInput.value = llm.baseUrl;
+  if (llm.model) ensureModelOption(llm.model);
+  if (llm.apiKeyPreview) {
+    elements.llmApiKeyInput.placeholder = `已配置 ${llm.apiKeyPreview}；留空保留`;
+  } else {
+    elements.llmApiKeyInput.placeholder = "留空则保留当前 Key";
+  }
+  elements.rememberLlmConfigInput.checked = Boolean(llm.saved);
+}
+
+async function loadLLMConfig() {
+  if (!isServerBackedPage()) return;
+  try {
+    const payload = await apiJson("/api/config");
+    syncLLMConfigForm(payload);
+  } catch (_error) {
+    elements.llmConfigStatus.textContent = "无法读取本机 API 设置";
+  }
+}
+
+async function saveLLMConfig() {
+  if (!isServerBackedPage()) {
+    elements.llmConfigStatus.textContent = "请通过 http://127.0.0.1:8080/ 打开后再保存";
+    return;
+  }
+
+  elements.saveLlmConfigBtn.disabled = true;
+  elements.saveLlmConfigBtn.textContent = "保存中";
+  elements.llmConfigStatus.textContent = "正在更新本机后端配置";
+  try {
+    const payload = await apiJson("/api/config/llm", {
+      method: "POST",
+      body: {
+        baseUrl: elements.llmBaseUrlInput.value.trim(),
+        model: elements.modelSelect.value.trim(),
+        apiKey: elements.llmApiKeyInput.value.trim(),
+        remember: elements.rememberLlmConfigInput.checked,
+      },
+    });
+    elements.llmApiKeyInput.value = "";
+    syncLLMConfigForm(payload);
+    elements.llmConfigStatus.textContent = payload.llm?.apiKeyConfigured
+      ? `已保存：${payload.llm.model} / ${payload.llm.baseUrl}`
+      : "已保存，但 API Key 仍未配置";
+    await checkLLMHealth(true);
+  } catch (error) {
+    elements.llmConfigStatus.textContent = error.message || "保存失败";
+  } finally {
+    elements.saveLlmConfigBtn.disabled = false;
+    elements.saveLlmConfigBtn.textContent = "保存 API 设置";
+  }
 }
 
 function getGenerationSourceText(kind) {
@@ -2524,9 +2584,9 @@ function updateTopStatus() {
   }
 }
 
-async function checkLLMHealth() {
+async function checkLLMHealth(force = false) {
   const now = Date.now();
-  if (state.llmBusy || now - state.lastHealthCheckAt < 1200) {
+  if (!force && (state.llmBusy || now - state.lastHealthCheckAt < 1200)) {
     return;
   }
   state.lastHealthCheckAt = now;
@@ -2537,8 +2597,9 @@ async function checkLLMHealth() {
       throw new Error("health check failed");
     }
     const payload = await response.json();
+    if (payload.baseUrl) elements.llmBaseUrlInput.value = payload.baseUrl;
     if (!payload.llmConfigured) {
-      setLLMStatus("后端已启动，LLM 未配置", "请设置 LLM_API_KEY 后重启 server.js。", false);
+      setLLMStatus("后端已启动，LLM 未配置", "可在这里填写 OpenAI-compatible API 设置，无需重启。", false);
       if (payload.model) {
         ensureModelOption(payload.model);
       }
@@ -3090,6 +3151,10 @@ elements.modelSelect.addEventListener("change", () => {
   renderPreview();
 });
 
+elements.saveLlmConfigBtn.addEventListener("click", () => {
+  saveLLMConfig();
+});
+
 elements.questionCard.addEventListener("input", () => {
   collectCurrentAnswer();
   updateSummaryCards();
@@ -3136,6 +3201,7 @@ elements.todayLabel.textContent = new Date().toLocaleDateString("zh-CN", {
 
 resetApp();
 checkLLMHealth();
+loadLLMConfig();
 refreshKnowledgeStatus();
 loadUploadedDocuments();
 loadPersistedSessions();

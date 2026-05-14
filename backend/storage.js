@@ -104,6 +104,12 @@ function createRuntimeStorage({ rootDir } = {}) {
       detail_json TEXT,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   const saveSessionStmt = db.prepare(`
@@ -197,6 +203,14 @@ function createRuntimeStorage({ rootDir } = {}) {
     FROM audit_logs
     ORDER BY created_at DESC, id DESC
     LIMIT ?
+  `);
+  const getSettingStmt = db.prepare("SELECT value_json FROM settings WHERE key = ?");
+  const setSettingStmt = db.prepare(`
+    INSERT INTO settings (key, value_json, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      value_json = excluded.value_json,
+      updated_at = excluded.updated_at
   `);
 
   function saveSession(session) {
@@ -387,6 +401,15 @@ function createRuntimeStorage({ rootDir } = {}) {
     }));
   }
 
+  function getSetting(key, fallback = null) {
+    const row = getSettingStmt.get(key);
+    return row ? fromJson(row.value_json, fallback) : fallback;
+  }
+
+  function setSetting(key, value) {
+    setSettingStmt.run(key, toJson(value), new Date().toISOString());
+  }
+
   return {
     baseDir,
     dbPath,
@@ -403,6 +426,8 @@ function createRuntimeStorage({ rootDir } = {}) {
     listUploadedDocuments,
     getUploadedDocument,
     deleteUploadedDocument,
+    getSetting,
+    setSetting,
   };
 }
 

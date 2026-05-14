@@ -371,6 +371,7 @@ curl -s -X POST http://127.0.0.1:8080/api/knowledge/search \
 - `uploaded_documents`：上传文件 metadata、抽取文本、Milvus collection、Milvus 主键和入库状态。
 - `document_chunks`：上传文档的本地向量兜底检索片段。
 - `audit_logs`：创建会话、提交答案、跳转问题、生成提示词、上传/删除文档等审计事件。
+- `settings`：可选保存本机 LLM 接口配置。API Key 不会提交到 Git，但如果勾选“记住到本机”，会写入本机 `runtime.sqlite`。
 
 如果要把这些数据切到外部数据库，优先替换 [backend/storage.js](/Users/cyc/Desktop/相关文档/00-项目/szlab/RAG智能体问答系统/backend/storage.js) 的实现，保持同一组读写函数即可。
 
@@ -426,7 +427,7 @@ EMBEDDING_API_KEY=你的 API Key
 
 ## 真实接入 LLM
 
-后端代理 [server.js](/Users/cyc/Desktop/相关文档/00-项目/szlab/RAG智能体问答系统/server.js) 支持 OpenAI-compatible Chat Completions 接口。API Key 只放在服务端 `.env` 或环境变量中，不暴露给浏览器。
+后端代理 [server.js](/Users/cyc/Desktop/相关文档/00-项目/szlab/RAG智能体问答系统/server.js) 支持 OpenAI-compatible Chat Completions 接口。API Key 可以放在服务端 `.env` / 环境变量中，也可以在页面左侧 `LLM 接入` 卡片中配置。页面只把 Key 发送到本机后端，不会在 `/api/config` 或 `/api/health` 中回显明文。
 
 OpenAI 示例：
 
@@ -443,6 +444,13 @@ LLM_API_KEY=你的 API Key
 LLM_BASE_URL=你的兼容接口地址，例如 https://.../v1
 LLM_MODEL=你的模型名
 ```
+
+运行时也可以通过前端设置：
+
+- `接口地址`：OpenAI-compatible `/v1` 基础地址。
+- `API Key`：留空保存时会保留当前 Key。
+- `基础模型`：使用左侧基础模型下拉框的当前值；若后端返回新模型名，会自动加入下拉框。
+- `记住到本机`：勾选后写入 `data/runtime/runtime.sqlite` 的 `settings` 表；不勾选则仅在当前 server 进程内生效。
 
 页面会自动检测 `/api/health`：
 

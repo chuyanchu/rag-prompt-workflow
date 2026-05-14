@@ -40,10 +40,6 @@ loadEnvFile();
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || "127.0.0.1";
-const LLM_BASE_URL = (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-const LLM_MODEL = process.env.LLM_MODEL || "gpt-4.1";
-const LLM_API_KEY = process.env.LLM_API_KEY || "";
-const LLM_PATH = process.env.LLM_CHAT_COMPLETIONS_PATH || "/chat/completions";
 const PYTHON_BIN = process.env.PYTHON_BIN || (fs.existsSync(BUNDLED_PYTHON) ? BUNDLED_PYTHON : "python3");
 const RUNTIME_STORE_DIR = path.resolve(ROOT, process.env.RUNTIME_STORE_DIR || path.join("data", "runtime"));
 const MILVUS_DB_PATH = path.resolve(ROOT, process.env.MILVUS_DB_PATH || path.join("data", "milvus_knowledge.db"));
@@ -82,6 +78,12 @@ const UPLOADED_KNOWLEDGE_SOURCE = {
   sampleQuery: "从上传文档中检索术语、标准或证据句",
 };
 const KNOWLEDGE_SOURCES = [...MILVUS_KNOWLEDGE_SOURCES, UPLOADED_KNOWLEDGE_SOURCE];
+const runtimeConfig = {
+  llmBaseUrl: (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
+  llmModel: process.env.LLM_MODEL || "gpt-4.1",
+  llmApiKey: process.env.LLM_API_KEY || "",
+  llmPath: process.env.LLM_CHAT_COMPLETIONS_PATH || "/chat/completions",
+};
 
 const MIME_TYPES = {
   ".html": "text/html;charset=utf-8",
@@ -114,15 +116,31 @@ function normalizeLLMContent(content) {
   return content == null ? "" : String(content);
 }
 
+function normalizeBaseUrl(value) {
+  return String(value || "https://api.openai.com/v1").trim().replace(/\/+$/, "");
+}
+
+function normalizeLLMPath(value) {
+  const pathValue = String(value || "/chat/completions").trim();
+  return pathValue.startsWith("/") ? pathValue : `/${pathValue}`;
+}
+
+function getApiKeyPreview(value) {
+  const key = String(value || "");
+  if (!key) return "";
+  if (key.length <= 8) return "********";
+  return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
 async function callLLMProvider({ model, messages, temperature = 0.2, jsonMode = false }) {
-  if (!LLM_API_KEY) {
+  if (!runtimeConfig.llmApiKey) {
     const error = new Error("LLM_API_KEY is not configured on the server.");
     error.statusCode = 500;
     throw error;
   }
 
   const payload = {
-    model: model || LLM_MODEL,
+    model: model || runtimeConfig.llmModel,
     messages,
     temperature,
   };
@@ -131,10 +149,10 @@ async function callLLMProvider({ model, messages, temperature = 0.2, jsonMode = 
     payload.response_format = { type: "json_object" };
   }
 
-  const upstream = await fetch(`${LLM_BASE_URL}${LLM_PATH}`, {
+  const upstream = await fetch(`${runtimeConfig.llmBaseUrl}${runtimeConfig.llmPath}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${LLM_API_KEY}`,
+      Authorization: `Bearer ${runtimeConfig.llmApiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
@@ -157,8 +175,15 @@ async function callLLMProvider({ model, messages, temperature = 0.2, jsonMode = 
 }
 
 const runtimeStorage = createRuntimeStorage({ rootDir: RUNTIME_STORE_DIR });
+const savedLlmConfig = runtimeStorage.getSetting("llm_config", null);
+if (savedLlmConfig && typeof savedLlmConfig === "object") {
+  runtimeConfig.llmBaseUrl = normalizeBaseUrl(savedLlmConfig.baseUrl || runtimeConfig.llmBaseUrl);
+  runtimeConfig.llmModel = String(savedLlmConfig.model || runtimeConfig.llmModel).trim() || runtimeConfig.llmModel;
+  runtimeConfig.llmPath = normalizeLLMPath(savedLlmConfig.path || runtimeConfig.llmPath);
+  runtimeConfig.llmApiKey = String(savedLlmConfig.apiKey || runtimeConfig.llmApiKey);
+}
 const orchestrator = createOrchestrator({
-  defaultModel: LLM_MODEL,
+  defaultModel: runtimeConfig.llmModel,
   callLLM: callLLMProvider,
   storage: runtimeStorage,
 });
@@ -745,7 +770,7 @@ async function handleLLM(request, response) {
     }
 
     const result = await callLLMProvider({
-      model: body.model || LLM_MODEL,
+      model: body.model || runtimeConfig.llmModel,
       messages,
       temperature: typeof body.temperature === "number" ? body.temperature : 0.2,
       jsonMode: Boolean(body.jsonMode),
@@ -755,6 +780,82 @@ async function handleLLM(request, response) {
   } catch (error) {
     sendJson(response, error.statusCode || 500, {
       error: error.message || "Unexpected LLM proxy error.",
+      detail: error.detail,
+    });
+  }
+}
+
+function getConfigPayload() {
+  return {
+    llm: {
+      baseUrl: runtimeConfig.llmBaseUrl,
+      model: runtimeConfig.llmModel,
+      path: runtimeConfig.llmPath,
+      apiKeyConfigured: Boolean(runtimeConfig.llmApiKey),
+      apiKeyPreview: getApiKeyPreview(runtimeConfig.llmApiKey),
+      saved: Boolean(runtimeStorage.getSetting("llm_config", null)),
+    },
+  };
+}
+
+async function handleConfig(request, response) {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+
+  try {
+    if (request.method === "GET" && url.pathname === "/api/config") {
+      sendJson(response, 200, getConfigPayload());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/config/llm") {
+      const body = JSON.parse(await readRequestBody(request));
+      const baseUrl = normalizeBaseUrl(body.baseUrl || runtimeConfig.llmBaseUrl);
+      const model = String(body.model || runtimeConfig.llmModel).trim();
+      const llmPath = normalizeLLMPath(body.path || runtimeConfig.llmPath);
+      if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+        sendJson(response, 400, { error: "baseUrl must start with http:// or https://." });
+        return;
+      }
+      if (!model) {
+        sendJson(response, 400, { error: "model is required." });
+        return;
+      }
+
+      runtimeConfig.llmBaseUrl = baseUrl;
+      runtimeConfig.llmModel = model;
+      runtimeConfig.llmPath = llmPath;
+      if (body.clearApiKey) {
+        runtimeConfig.llmApiKey = "";
+      } else if (typeof body.apiKey === "string" && body.apiKey.trim()) {
+        runtimeConfig.llmApiKey = body.apiKey.trim();
+      }
+
+      if (body.remember) {
+        runtimeStorage.setSetting("llm_config", {
+          baseUrl: runtimeConfig.llmBaseUrl,
+          model: runtimeConfig.llmModel,
+          path: runtimeConfig.llmPath,
+          apiKey: runtimeConfig.llmApiKey,
+        });
+      }
+      runtimeStorage.appendAudit({
+        type: "update_llm_config",
+        detail: {
+          baseUrl: runtimeConfig.llmBaseUrl,
+          model: runtimeConfig.llmModel,
+          path: runtimeConfig.llmPath,
+          apiKeyConfigured: Boolean(runtimeConfig.llmApiKey),
+          remembered: Boolean(body.remember),
+        },
+      });
+      sendJson(response, 200, getConfigPayload());
+      return;
+    }
+
+    sendJson(response, 404, { error: "config route not found." });
+  } catch (error) {
+    sendJson(response, error.statusCode || 500, {
+      error: error.message || "Unexpected config error.",
       detail: error.detail,
     });
   }
@@ -959,9 +1060,11 @@ async function handleOrchestrator(request, response) {
 const server = http.createServer((request, response) => {
   if (request.method === "GET" && request.url.startsWith("/api/health")) {
     sendJson(response, 200, {
-      llmConfigured: Boolean(LLM_API_KEY),
-      model: LLM_MODEL,
-      baseUrl: LLM_BASE_URL,
+      llmConfigured: Boolean(runtimeConfig.llmApiKey),
+      model: runtimeConfig.llmModel,
+      baseUrl: runtimeConfig.llmBaseUrl,
+      chatPath: runtimeConfig.llmPath,
+      apiKeyPreview: getApiKeyPreview(runtimeConfig.llmApiKey),
       knowledgeConfigured: fs.existsSync(MILVUS_DB_PATH) || getUploadedKnowledgeStatus().health === "ready",
       knowledgeCollection: MILVUS_COLLECTION,
       knowledgeSources: KNOWLEDGE_SOURCES,
@@ -972,6 +1075,11 @@ const server = http.createServer((request, response) => {
 
   if (request.method === "POST" && request.url.startsWith("/api/llm")) {
     handleLLM(request, response);
+    return;
+  }
+
+  if (request.url.startsWith("/api/config")) {
+    handleConfig(request, response);
     return;
   }
 
@@ -996,7 +1104,7 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`RAG prompt workstation: http://${HOST}:${PORT}`);
-  console.log(`LLM proxy: ${LLM_API_KEY ? "enabled" : "disabled, set LLM_API_KEY to enable"}`);
+  console.log(`LLM proxy: ${runtimeConfig.llmApiKey ? "enabled" : "disabled, configure it in the UI or set LLM_API_KEY"}`);
 });
 
 server.on("error", (error) => {
