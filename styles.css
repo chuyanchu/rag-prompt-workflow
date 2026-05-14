@@ -126,15 +126,38 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.select-wrap {
+  position: relative;
+  display: block;
+}
+
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  pointer-events: none;
+  transform: translateY(-62%) rotate(45deg);
+}
+
 .select-wrap select {
+  appearance: none;
   width: 100%;
-  min-height: 40px;
-  padding: 8px 11px;
-  border-radius: 10px;
+  min-height: 42px;
+  padding: 9px 38px 9px 12px;
+  border-radius: 8px;
   border: 1px solid var(--line);
-  background: var(--surface);
+  background: rgba(255, 253, 248, 0.74);
   color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 800;
+  line-height: 1.2;
   outline: none;
+  box-shadow: none;
 }
 
 .knowledge-card,
