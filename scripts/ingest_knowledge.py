@@ -44,6 +44,7 @@ DEFAULT_MARKDOWN = (
     "/Users/cyc/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/"
     "wxid_t3me8j3lw09h22_9ac8/msg/file/2026-05/材料大词典第二版.md"
 )
+METADATA_SCHEMA_VERSION = "2026-05-14.1"
 
 
 @dataclass
@@ -122,6 +123,68 @@ def normalize_text(value: object) -> str:
     return text
 
 
+def split_metadata_list(value: object) -> list[str]:
+    text = normalize_text(value)
+    if not text:
+        return []
+    return [
+        item.strip()
+        for item in re.split(r"\s*(?:[|/、,，;；]|\bor\b|\band\b)\s*", text, flags=re.I)
+        if item.strip()
+    ]
+
+
+def compact_metadata(metadata: dict) -> dict:
+    compacted = {}
+    for key, value in metadata.items():
+        if value in (None, "", [], {}):
+            continue
+        compacted[key] = value
+    return compacted
+
+
+def source_id(*parts: object) -> str:
+    return ":".join(normalize_text(part).replace(":", "_") for part in parts if normalize_text(part))
+
+
+def base_metadata(
+    *,
+    source_type: str,
+    source_id_value: str,
+    canonical_name: str = "",
+    aliases: list[str] | None = None,
+    definition: str = "",
+    field_name: str = "",
+    unit: str = "",
+    data_type: str = "",
+    section: str = "",
+    evidence_type: str = "",
+    source_title: str = "",
+    source_path: str = "",
+    source_url: str = "",
+    extra: dict | None = None,
+) -> dict:
+    return compact_metadata(
+        {
+            "schema_version": METADATA_SCHEMA_VERSION,
+            "source_id": source_id_value,
+            "source_type": source_type,
+            "source_title": source_title,
+            "source_path": source_path,
+            "source_url": source_url,
+            "canonical_name": canonical_name,
+            "aliases": [item for item in aliases or [] if item and item != canonical_name],
+            "definition": definition,
+            "field_name": field_name,
+            "unit": unit,
+            "data_type": data_type,
+            "section": section,
+            "evidence_type": evidence_type,
+            **(extra or {}),
+        }
+    )
+
+
 def find_header_row(rows: list[list[object]]) -> int:
     for index, row in enumerate(rows):
         normalized = [normalize_text(cell) for cell in row]
@@ -140,23 +203,54 @@ def row_to_document(
     current_field: str,
 ) -> Document | None:
     pairs = []
-    metadata = {
-        "workbook": workbook_path.name,
-        "sheet": sheet_name,
-        "row_number": row_number,
-        "section": current_section,
-        "field_name": current_field,
-    }
+    row_fields = {}
 
     for index, raw_value in enumerate(values):
         value = normalize_text(raw_value)
         if not value:
             continue
         header = headers[index] if index < len(headers) and headers[index] else f"列{index + 1}"
+        row_fields[header] = value
         pairs.append(f"{header}: {value}")
 
     if not pairs:
         return None
+
+    def field_value(*names: str) -> str:
+        for name in names:
+            if name in row_fields:
+                return row_fields[name]
+        for header, value in row_fields.items():
+            if any(name in header for name in names):
+                return value
+        return ""
+
+    definition = field_value("定义")
+    aliases = split_metadata_list(field_value("涵盖参数", "同义词", "别名", "英文别名"))
+    data_type = field_value("数据类型", "类型")
+    unit = field_value("单位")
+    canonical_name = current_field or field_value("列名", "字段")
+    evidence_type = "excel_includes_parameter" if aliases else "excel_row"
+    metadata = base_metadata(
+        source_type="excel",
+        source_id_value=source_id("excel", workbook_path.name, sheet_name, row_number),
+        canonical_name=canonical_name,
+        aliases=aliases,
+        definition=definition,
+        field_name=canonical_name,
+        unit=unit,
+        data_type=data_type,
+        section=current_section,
+        evidence_type=evidence_type,
+        source_title=workbook_path.name,
+        source_path=str(workbook_path),
+        extra={
+            "workbook": workbook_path.name,
+            "sheet": sheet_name,
+            "row_number": row_number,
+            "raw_fields": row_fields,
+        },
+    )
 
     text = "\n".join(
         [
@@ -286,12 +380,20 @@ def load_markdown_documents(paths: Iterable[str], start_heading: str = "", stop_
                     title=f"{markdown_path.name} / {section}",
                     source_type="markdown",
                     source_uri=f"{markdown_path}#L{section_start}",
-                    metadata={
-                        "file": markdown_path.name,
-                        "section": section,
-                        "start_line": section_start,
-                        "end_line": end_line,
-                    },
+                    metadata=base_metadata(
+                        source_type="markdown",
+                        source_id_value=source_id("markdown", markdown_path.name, section_start),
+                        canonical_name=section,
+                        section=section,
+                        evidence_type="markdown_section",
+                        source_title=markdown_path.name,
+                        source_path=str(markdown_path),
+                        extra={
+                            "file": markdown_path.name,
+                            "start_line": section_start,
+                            "end_line": end_line,
+                        },
+                    ),
                 )
             )
             buffer = []
@@ -365,6 +467,26 @@ def parse_markdown_entry_start(line: str) -> dict | None:
     return None
 
 
+def markdown_term_aliases(term: str, english: str, definition: str, kind: str) -> tuple[list[str], str]:
+    aliases = []
+    if english:
+        aliases.append(english)
+    evidence_type = "dictionary_see_also" if kind == "reference" else "dictionary_definition"
+
+    alias_match = re.match(r"^又称(.+?)[。；;，,]", definition)
+    if alias_match:
+        aliases.extend(split_metadata_list(alias_match.group(1)))
+        evidence_type = "dictionary_alias"
+
+    see_also_match = re.match(r"^(?:见|参见)(.+?)(?:[（(]|[。；;，,]|$)", definition)
+    if see_also_match:
+        aliases.append(see_also_match.group(1).strip())
+        evidence_type = "dictionary_see_also"
+
+    aliases = [item for item in dict.fromkeys(aliases) if item and item != term]
+    return aliases, evidence_type
+
+
 def load_markdown_term_documents(paths: Iterable[str], start_heading: str = "", stop_pattern: str = "") -> list[Document]:
     documents: list[Document] = []
     heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -426,6 +548,7 @@ def load_markdown_term_documents(paths: Iterable[str], start_heading: str = "", 
                 current_lines = []
                 return
 
+            aliases, evidence_type = markdown_term_aliases(current["term"], current["english"], definition, current["kind"])
             english_line = f"英文: {current['english']}" if current["english"] else "英文: 未标注"
             text = "\n".join(
                 [
@@ -444,15 +567,25 @@ def load_markdown_term_documents(paths: Iterable[str], start_heading: str = "", 
                     title=f"{current['term']}{title_suffix}",
                     source_type="markdown_term",
                     source_uri=f"{markdown_path}#L{current_start_line}",
-                    metadata={
-                        "file": markdown_path.name,
-                        "term": current["term"],
-                        "english": current["english"],
-                        "section": current_section,
-                        "kind": current["kind"],
-                        "start_line": current_start_line,
-                        "end_line": end_line,
-                    },
+                    metadata=base_metadata(
+                        source_type="markdown_term",
+                        source_id_value=source_id("markdown_term", markdown_path.name, current_start_line),
+                        canonical_name=current["term"],
+                        aliases=aliases,
+                        definition=definition,
+                        section=current_section,
+                        evidence_type=evidence_type,
+                        source_title=markdown_path.name,
+                        source_path=str(markdown_path),
+                        extra={
+                            "file": markdown_path.name,
+                            "term": current["term"],
+                            "english": current["english"],
+                            "kind": current["kind"],
+                            "start_line": current_start_line,
+                            "end_line": end_line,
+                        },
+                    ),
                 )
             )
             current = None
@@ -573,7 +706,16 @@ def crawl_site_documents(
                     title=parser.title or url,
                     source_type="web",
                     source_uri=url,
-                    metadata={"url": url, "depth": depth, "title": parser.title or ""},
+                    metadata=base_metadata(
+                        source_type="web",
+                        source_id_value=source_id("web", url),
+                        canonical_name=parser.title or url,
+                        definition=text[:500],
+                        evidence_type="web_page",
+                        source_title=parser.title or url,
+                        source_url=url,
+                        extra={"url": url, "depth": depth, "title": parser.title or ""},
+                    ),
                 )
             )
 

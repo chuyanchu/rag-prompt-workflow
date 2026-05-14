@@ -130,6 +130,15 @@ python3 scripts/ingest_knowledge.py --reset --skip-default-excel --skip-site --d
 - 网站：[全国标准信息公共服务平台](https://std.samr.gov.cn/)，默认从首页开始，限制抓取 `std.samr.gov.cn` 与 `openstd.samr.gov.cn`，并通过 `--site-max-pages` 和 `--site-depth` 控制规模，避免一次性抓取整站。
 - Markdown 词典：`材料大辞典第二版.md` 使用 `--markdown-mode term` 按术语条目切分，跳过书籍前置信息、编委会、专业目录和英文索引。
 
+每条知识片段会在 `metadata_json` 中写入统一结构化字段，用于检索重排、同义词证据和前端健康检查：
+
+- `schema_version`、`source_id`、`source_type`、`source_title`
+- `canonical_name`、`aliases`、`definition`
+- `field_name`、`unit`、`data_type`、`section`
+- `evidence_type`，例如 `excel_includes_parameter`、`dictionary_alias`、`dictionary_see_also`、`web_page`
+
+旧字段如 `term`、`english`、`workbook`、`sheet`、`row_number` 仍会保留在 metadata 中，以兼容已有检索和调试脚本。
+
 入库后检索自测：
 
 ```bash

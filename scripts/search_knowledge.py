@@ -70,10 +70,14 @@ def lexical_score(query: str, title: str, text: str, metadata_json: str) -> floa
         metadata = {}
     term = str(metadata.get("term") or "")
     english = str(metadata.get("english") or "")
+    canonical_name = str(metadata.get("canonical_name") or metadata.get("field_name") or "")
+    aliases = [str(item) for item in metadata.get("aliases") or [] if item]
+    metadata_terms = [term, english, canonical_name, *aliases]
+    metadata_terms_lower = [item.lower() for item in metadata_terms if item]
 
     for phrase in query_phrases(query):
         phrase_lower = phrase.lower()
-        if phrase and (phrase == term or phrase_lower == english.lower()):
+        if phrase and phrase_lower in metadata_terms_lower:
             score += 6.0 + min(len(phrase) * 0.08, 0.8)
         elif phrase in title or phrase_lower in lower_title:
             score += 1.4 + min(len(phrase) * 0.04, 0.45)
@@ -81,7 +85,7 @@ def lexical_score(query: str, title: str, text: str, metadata_json: str) -> floa
             score += 0.45 + min(len(phrase) * 0.02, 0.25)
 
     for word in query_words(query):
-        if word == english.lower():
+        if word in metadata_terms_lower:
             score += 1.4
         elif word in lower_title:
             score += 0.7

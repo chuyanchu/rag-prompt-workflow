@@ -78,7 +78,11 @@ def inspect_collection(client, existing_collections: set[str], collection: str, 
                 "title": row.get("title") or "",
                 "sourceType": row.get("source_type") or "",
                 "sourceUri": row.get("source_uri") or "",
-                "term": metadata.get("term") or metadata.get("field_name") or "",
+                "schemaVersion": metadata.get("schema_version") or "",
+                "sourceId": metadata.get("source_id") or "",
+                "term": metadata.get("canonical_name") or metadata.get("term") or metadata.get("field_name") or "",
+                "aliases": metadata.get("aliases") or [],
+                "evidenceType": metadata.get("evidence_type") or "",
                 "section": metadata.get("section") or "",
             }
         )
