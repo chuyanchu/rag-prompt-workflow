@@ -31,9 +31,30 @@
 
         <section class="sidebar-section">
           <div class="section-label">LLM 接入</div>
-          <div class="knowledge-card">
-            <strong id="llmStatusTitle">正在检测后端</strong>
-            <p id="llmStatusText">通过 server.js 启动后，可调用真实 OpenAI-compatible 模型。</p>
+          <div class="knowledge-card agent-card" id="llmConfigCard">
+            <div class="agent-status-head">
+              <span class="agent-status-dot"></span>
+              <div>
+                <strong id="llmStatusTitle">正在检测后端</strong>
+                <p id="llmStatusText">通过 server.js 启动后，可调用真实 OpenAI-compatible 模型。</p>
+              </div>
+            </div>
+            <div class="llm-config-form">
+              <label>
+                <span>Endpoint</span>
+                <input id="llmBaseUrlInput" class="sidebar-input" type="url" placeholder="https://api.openai.com/v1" />
+              </label>
+              <label>
+                <span>API Key</span>
+                <input id="llmApiKeyInput" class="sidebar-input" type="password" placeholder="留空则保留当前 Key" autocomplete="off" />
+              </label>
+              <label class="remember-row">
+                <input id="rememberLlmConfigInput" type="checkbox" />
+                <span>记住到本机</span>
+              </label>
+              <button class="agent-save-btn" id="saveLlmConfigBtn" type="button">保存 API 设置</button>
+              <small id="llmConfigStatus">Key 只发送到本机后端，不会在页面回显。</small>
+            </div>
           </div>
         </section>
 
@@ -43,6 +64,16 @@
             <strong id="knowledgeStatusTitle">当前使用通用模板</strong>
             <p id="knowledgeStatusText">未接入知识库时，系统会基于通用领域模板生成候选项。</p>
             <button class="mini-btn" id="refreshKnowledgeBtn" type="button">刷新状态</button>
+            <div class="upload-panel">
+              <input id="knowledgeFileInput" class="file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.html,.htm,.pdf,.docx,.xlsx" />
+              <div class="file-picker-row">
+                <label class="file-picker-btn" for="knowledgeFileInput">选择文件</label>
+                <span class="file-name" id="knowledgeFileName">未选择文件</span>
+              </div>
+              <button class="mini-btn" id="uploadKnowledgeBtn" type="button">上传文档</button>
+              <small id="uploadKnowledgeStatus">支持 txt、md、csv、json、html、pdf、docx、xlsx</small>
+            </div>
+            <div class="uploaded-document-list" id="uploadedDocumentList"></div>
             <div class="knowledge-source-list" id="knowledgeSourceList"></div>
           </div>
           <button class="sidebar-btn" id="loadSampleBtn" type="button">载入钢结构示例</button>
@@ -55,8 +86,17 @@
 
         <section class="sidebar-section grow">
           <div class="section-label">历史会话</div>
+          <button class="mini-btn" id="refreshSessionsBtn" type="button">刷新会话</button>
           <div id="historyList" class="history-list">
             <div class="history-item muted">尚未生成会话</div>
+          </div>
+          <div class="section-label tight">提示词版本</div>
+          <div id="promptVersionList" class="history-list">
+            <div class="history-item muted">尚未生成版本</div>
+          </div>
+          <div class="section-label tight">审计日志</div>
+          <div id="auditLogList" class="history-list">
+            <div class="history-item muted">暂无审计事件</div>
           </div>
         </section>
 
@@ -109,7 +149,7 @@
 
               <div class="mode-switch" id="modeSwitch">
                 <button class="mode-btn active" data-mode="generic" type="button">通用模板</button>
-                <button class="mode-btn" data-mode="rag" type="button">Milvus 知识库</button>
+                <button class="mode-btn" data-mode="rag" type="button">RAG 知识库</button>
               </div>
 
               <label class="field hidden" id="knowledgeField">
@@ -117,7 +157,7 @@
                 <textarea
                   id="knowledgeInput"
                   rows="5"
-                  placeholder="切换到 Milvus 知识库后，系统会按原始提示词自动召回片段；也可以在这里追加人工术语或标准条目。"
+                  placeholder="切换到 RAG 知识库后，系统会按原始提示词自动召回片段；也可以在这里追加人工术语或标准条目。"
                 ></textarea>
               </label>
 

@@ -101,14 +101,38 @@ const EVIDENCE_GRADE = {
   D: "D 级：禁止合并",
 };
 
+const EVIDENCE_DECISION_MATRIX = {
+  excel_includes_parameter: { grade: "A", action: "自动合并", relationType: "字段涵盖参数" },
+  dictionary_alias: { grade: "A", action: "自动合并", relationType: "词典又称" },
+  dictionary_see_also: { grade: "A", action: "自动合并", relationType: "词典见/参见" },
+  exact_alias: { grade: "A", action: "自动合并", relationType: "精确别名" },
+  standard_equivalent: { grade: "A", action: "自动合并", relationType: "标准等价术语" },
+  bilingual_alias: { grade: "B", action: "建议合并", relationType: "中英文别名" },
+  abbreviation: { grade: "B", action: "建议合并", relationType: "缩写/符号" },
+  symbol_alias: { grade: "B", action: "建议合并", relationType: "符号别名" },
+  llm_inferred: { grade: "B", action: "建议合并", relationType: "模型推断" },
+  related_only: { grade: "C", action: "相关但不合并", relationType: "同类相关" },
+  field_type_conflict: { grade: "D", action: "禁止合并", relationType: "字段类型冲突" },
+  metric_type_conflict: { grade: "D", action: "禁止合并", relationType: "指标类型冲突" },
+  semantic_boundary_conflict: { grade: "D", action: "禁止合并", relationType: "语义边界冲突" },
+  category_type_conflict: { grade: "D", action: "禁止合并", relationType: "信息类别冲突" },
+};
+
+function getEvidenceDecision(evidenceType = "llm_inferred") {
+  return EVIDENCE_DECISION_MATRIX[evidenceType] || EVIDENCE_DECISION_MATRIX.llm_inferred;
+}
+
 function makeSynonymValue(group) {
   return `${group.grade || "B"}|${group.canonical} => ${(group.aliases || []).join(" / ")}`;
 }
 
 function makeSynonymDescription(group) {
+  const decision = getEvidenceDecision(group.evidenceType);
   return [
     EVIDENCE_GRADE[group.grade] || EVIDENCE_GRADE.B,
     group.evidenceType ? `证据类型：${group.evidenceType}` : "",
+    decision.action ? `决策：${decision.action}` : "",
+    group.relationType || decision.relationType ? `关系类型：${group.relationType || decision.relationType}` : "",
     group.evidenceText ? `证据：${group.evidenceText}` : "",
   ]
     .filter(Boolean)
@@ -117,11 +141,42 @@ function makeSynonymDescription(group) {
 
 function classifyEvidence({ evidenceType = "llm_inferred", grade = "" } = {}) {
   if (grade) return grade;
-  if (["excel_includes_parameter", "dictionary_alias", "dictionary_see_also"].includes(evidenceType)) return "A";
-  if (["bilingual_alias", "abbreviation"].includes(evidenceType)) return "B";
-  if (["related_only"].includes(evidenceType)) return "C";
-  if (["field_type_conflict", "metric_type_conflict", "semantic_boundary_conflict", "category_type_conflict"].includes(evidenceType)) return "D";
-  return "B";
+  return getEvidenceDecision(evidenceType).grade;
+}
+
+function isLikelyAbbreviation(value) {
+  const text = String(value || "").trim();
+  return /^[A-Z]{2,8}$/.test(text) || /^[σγ][A-Za-z0-9_.′'’\-]{1,12}$/.test(text) || /^[A-Z][A-Za-z]?[0-9.]{1,8}$/.test(text);
+}
+
+function canonicalPriority(value, evidenceType = "") {
+  const text = String(value || "").trim();
+  if (!text) return -100;
+  let score = Math.min(text.length, 36) * 0.05;
+  if (/[\u4e00-\u9fff]/.test(text)) score += 3;
+  if (/\bname\b$/i.test(text)) score += 2.5;
+  if (/\b(value|unit|ratio|rate)\b$/i.test(text)) score += 1.2;
+  if (/\s/.test(text)) score += 1;
+  if (/^[A-Za-z][A-Za-z\s\-]+$/.test(text) && text.length > 8) score += 0.8;
+  if (isLikelyAbbreviation(text)) score -= 4;
+  if (evidenceType === "excel_includes_parameter") score += 1;
+  return score;
+}
+
+function chooseCanonicalTerm(canonical, aliases, evidenceType = "") {
+  const candidates = [canonical, ...(aliases || [])]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (!candidates.length) return { canonical: "", aliases: [] };
+
+  const selected = candidates
+    .map((term, index) => ({ term, index, score: canonicalPriority(term, evidenceType) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)[0].term;
+  const selectedKey = selected.toLowerCase();
+  return {
+    canonical: selected,
+    aliases: [...new Set(candidates.filter((item) => item.toLowerCase() !== selectedKey))],
+  };
 }
 
 const FIELD_TYPE_SUFFIXES = ["name", "value", "unit", "ratio", "rate"];
@@ -493,6 +548,17 @@ function normalizeKnowledgeLine(line) {
     .trim();
 }
 
+function cleanBoundaryTerm(value) {
+  return String(value || "")
+    .replace(/^(?:定义|术语|字段)[：:]\s*/, "")
+    .replace(/^(?:又称|见|参见)\s*/, "")
+    .replace(/(?:直接|作为同义词|作为同义词项)?$/, "")
+    .split(/[为是属于]/)[0]
+    .trim()
+    .replace(/[，,。；;：:]+$/, "")
+    .trim();
+}
+
 function parseKnowledgeProfile(text, scenario) {
   const library = GENERIC_LIBRARY[scenario.domainKey];
   const synonyms = {};
@@ -500,19 +566,27 @@ function parseKnowledgeProfile(text, scenario) {
   const synonymGroups = [];
   let currentFieldName = "";
 
+  function splitAliasText(value) {
+    return String(value || "")
+      .split(/\s*(?:[;；|、,，/]|\b和\b|\band\b)\s*/i)
+      .map(cleanBoundaryTerm)
+      .filter((item) => item && item.length <= 60);
+  }
+
   function addSynonymGroup(canonical, aliases, evidence = {}) {
-    const cleanCanonical = String(canonical || "").trim();
-    const cleanAliases = [...new Set((aliases || []).map((item) => String(item || "").trim()).filter(Boolean))].filter(
-      (item) => item !== cleanCanonical
-    );
-    if (!cleanCanonical || !cleanAliases.length) return;
     const evidenceType = evidence.evidenceType || "llm_inferred";
+    const selectedTerms = chooseCanonicalTerm(canonical, aliases, evidenceType);
+    const cleanCanonical = selectedTerms.canonical;
+    const cleanAliases = selectedTerms.aliases;
+    if (!cleanCanonical || !cleanAliases.length) return;
     const grade = classifyEvidence({ evidenceType, grade: evidence.grade });
+    const decision = getEvidenceDecision(evidenceType);
     synonymGroups.push({
       canonical: cleanCanonical,
       aliases: cleanAliases,
       evidenceType,
       grade,
+      relationType: evidence.relationType || decision.relationType,
       evidenceText: evidence.evidenceText || "",
       autoSelect: grade === "A",
       disabled: grade === "C" || grade === "D",
@@ -523,6 +597,77 @@ function parseKnowledgeProfile(text, scenario) {
       terms.push(alias);
       synonyms[alias] = [...new Set([cleanCanonical, ...(synonyms[alias] || []), ...cleanAliases.filter((item) => item !== alias)])];
     });
+  }
+
+  function addForbiddenBoundaryGroups(item) {
+    const boundaryMatch = String(item || "").match(/([^。；;，,]{2,60}?)(?:为[^，。；;]*)?[，,]?\s*不能与\s*([^。；;，,]{2,60}?)(?:直接)?合并/);
+    if (!boundaryMatch) return;
+    const left = cleanBoundaryTerm(boundaryMatch[1]);
+    const right = cleanBoundaryTerm(boundaryMatch[2]);
+    if (!left || !right || left === right) return;
+    addSynonymGroup(right, [left], {
+      evidenceType: "category_type_conflict",
+      grade: "D",
+      evidenceText: item,
+      relationType: "知识片段禁止合并",
+    });
+  }
+
+  function addFreeTextEvidenceGroups(item) {
+    const text = String(item || "").trim();
+    const explicitTargetMatch = text.match(
+      /^(.{2,160}?)(?:表示|均为|同为|都是|属于)(.{0,40}?)(?:字段|术语|表达|参数|指标)[^。；;]*?(?:可|可以|应|应该|视为|作为|按)[^。；;]*?(?:同义|别名|等价|合并|归并)[^。；;]*?(?:到|为|至)\s*([^。；;，,]{2,80})/
+    );
+    if (explicitTargetMatch) {
+      const aliases = splitAliasText(explicitTargetMatch[1]);
+      addSynonymGroup(cleanBoundaryTerm(explicitTargetMatch[3]), aliases, {
+        evidenceType: "exact_alias",
+        grade: "A",
+        relationType: "自由文本同义证据",
+        evidenceText: item,
+      });
+      return true;
+    }
+
+    const sameFieldMatch = text.match(
+      /^(.{2,180}?)(?:表示|均为|同为|都是|属于)(.{0,60}?)(?:字段|术语|表达|参数|指标)[^。；;]*?(?:同义|别名|等价|合并|归并)/
+    );
+    if (sameFieldMatch) {
+      const aliases = splitAliasText(sameFieldMatch[1]);
+      if (aliases.length >= 2) {
+        addSynonymGroup(aliases[0], aliases.slice(1), {
+          evidenceType: "exact_alias",
+          grade: "A",
+          relationType: "自由文本同义证据",
+          evidenceText: item,
+        });
+        return true;
+      }
+    }
+
+    const aliasMatch = text.match(/^([^。；;，,]{2,80}?)(?:又称|也称|亦称|别称|等价于|等同于|即)\s*([^。；;]{2,140})/);
+    if (aliasMatch) {
+      addSynonymGroup(cleanBoundaryTerm(aliasMatch[1]), splitAliasText(aliasMatch[2]), {
+        evidenceType: "dictionary_alias",
+        grade: "A",
+        relationType: "自由文本又称/等价",
+        evidenceText: item,
+      });
+      return true;
+    }
+
+    const abbreviationMatch = text.match(/^([^。；;，,]{2,80}?)(?:缩写为|简称|符号为|记作)\s*([^。；;，,]{2,80})/);
+    if (abbreviationMatch) {
+      addSynonymGroup(cleanBoundaryTerm(abbreviationMatch[1]), splitAliasText(abbreviationMatch[2]), {
+        evidenceType: "abbreviation",
+        grade: "B",
+        relationType: "自由文本缩写/符号",
+        evidenceText: item,
+      });
+      return true;
+    }
+
+    return false;
   }
 
   String(text || "")
@@ -568,6 +713,7 @@ function parseKnowledgeProfile(text, scenario) {
           evidenceType: "dictionary_alias",
           evidenceText: item,
         });
+        addForbiddenBoundaryGroups(item);
         return;
       }
 
@@ -577,8 +723,16 @@ function parseKnowledgeProfile(text, scenario) {
           evidenceType: "dictionary_see_also",
           evidenceText: item,
         });
+        addForbiddenBoundaryGroups(item);
         return;
       }
+
+      if (addFreeTextEvidenceGroups(item)) {
+        addForbiddenBoundaryGroups(item);
+        return;
+      }
+
+      addForbiddenBoundaryGroups(item);
 
       if (item.includes("：") || item.includes(":")) return;
 
@@ -641,13 +795,15 @@ function getSynonymOptions(terms, knowledgeProfile) {
     const members = [canonical, ...aliases];
     const memberKeys = members.map(normalizeAlias).filter(Boolean);
     if (!memberKeys.some((key) => selectedKeys.has(key))) return;
-    if (memberKeys.some((key) => usedKeys.has(key))) return;
+    if (!["C", "D"].includes(group.grade) && memberKeys.some((key) => usedKeys.has(key))) return;
 
     const canonicalKey = normalizeAlias(canonical);
     const related = [...new Set(aliases)].filter((item) => normalizeAlias(item) && normalizeAlias(item) !== canonicalKey);
     if (!canonicalKey || !related.length) return;
 
-    memberKeys.forEach((key) => usedKeys.add(key));
+    if (!["C", "D"].includes(group.grade)) {
+      memberKeys.forEach((key) => usedKeys.add(key));
+    }
     options.push({
       value: makeSynonymValue(group),
       label: `${canonical}: ${related.join(" / ")}`,
@@ -668,11 +824,13 @@ function getSynonymOptions(terms, knowledgeProfile) {
     );
     if (!related.length) return;
     [term, ...related].map(normalizeAlias).filter(Boolean).forEach((key) => usedKeys.add(key));
+    const selectedTerms = chooseCanonicalTerm(term, related, "bilingual_alias");
     const group = {
-      canonical: term,
-      aliases: related,
+      canonical: selectedTerms.canonical,
+      aliases: selectedTerms.aliases,
       evidenceType: "bilingual_alias",
       grade: "B",
+      relationType: getEvidenceDecision("bilingual_alias").relationType,
       evidenceText: "内置通用术语词典",
     };
     options.push({
@@ -1022,6 +1180,91 @@ function getDefaultCustomAnswers(questions) {
   return customAnswers;
 }
 
+function normalizeForInference(value) {
+  return String(value || "").toLowerCase().replace(/\s+/g, " ");
+}
+
+function optionValue(question, label) {
+  return (question?.options || []).find((option) => option.value === label || option.label === label)?.value || "";
+}
+
+function inferAutoAnswers({ prompt, workflow, questions }) {
+  const text = normalizeForInference(prompt);
+  const byId = new Map(questions.map((question) => [question.id, question]));
+  const autoAnswers = {};
+
+  function setAnswer(questionId, answer, reason) {
+    if (answer === "" || answer == null || (Array.isArray(answer) && !answer.length)) return;
+    autoAnswers[questionId] = { answer, reason };
+  }
+
+  const targetQuestion = byId.get("target_type");
+  if (targetQuestion) {
+    if (workflow === "synonym_merge") {
+      if (/材料|material|alloy|glass|foam glass|porous glass|术语归一/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "材料术语归一"), "原始需求已指向材料术语归一。");
+      } else if (/字段|field|column|抽取字段/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "抽取字段标准化"), "原始需求已指向字段标准化。");
+      } else if (/标准|规范|standard/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "标准/规范术语对齐"), "原始需求已指向标准术语对齐。");
+      } else if (/中英文|英文|缩写|符号|alias|abbreviation/.test(text)) {
+        setAnswer("target_type", optionValue(targetQuestion, "中英文别名合并"), "原始需求已指向中英文别名合并。");
+      }
+    } else if (/抽取|extract|提取|信息抽取/.test(text)) {
+      setAnswer("target_type", optionValue(targetQuestion, "信息抽取") || optionValue(targetQuestion, "性能词条"), "原始需求已明确是抽取任务。");
+    } else if (/同义词|合并|归一|标准化/.test(text)) {
+      setAnswer("target_type", optionValue(targetQuestion, "同义词合并") || optionValue(targetQuestion, "术语标准化"), "原始需求已明确是术语合并/标准化任务。");
+    }
+  }
+
+  const outputQuestion = byId.get("output_format");
+  if (outputQuestion) {
+    if (/json\s*数组|json array/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "JSON 数组"), "原始需求已指定 JSON 数组。");
+    else if (/json\s*对象|json object/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "JSON 对象"), "原始需求已指定 JSON 对象。");
+    else if (/markdown\s*表格|markdown table/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "Markdown 表格"), "原始需求已指定 Markdown 表格。");
+    else if (/\bcsv\b/.test(text)) setAnswer("output_format", optionValue(outputQuestion, "CSV 字段"), "原始需求已指定 CSV。");
+  }
+
+  const bilingualQuestion = byId.get("bilingual_synonym");
+  if (bilingualQuestion) {
+    if (/不需要.*(同义|归并|合并)|无需.*(同义|归并|合并)|不强制.*(同义|归并|合并)/.test(text)) {
+      setAnswer("bilingual_synonym", "no", "原始需求明确不需要同义词归并。");
+    } else if (/同义词|别名|中英文|英文|缩写|符号|归并|合并|alias|abbreviation/.test(text)) {
+      setAnswer("bilingual_synonym", "yes", "原始需求已要求同义词/别名处理。");
+    }
+  }
+
+  const mergePolicyQuestion = byId.get("merge_policy");
+  if (mergePolicyQuestion) {
+    if (/严格|只有明确|不得.*推断|不能.*推断/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "严格合并"), "原始需求已要求严格合并。");
+    } else if (/人工复核|待确认|复核/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "人工复核优先"), "原始需求已要求人工复核。");
+    } else if (/宽松|聚类|近义/.test(text)) {
+      setAnswer("merge_policy", optionValue(mergePolicyQuestion, "宽松聚类"), "原始需求已允许宽松聚类。");
+    }
+  }
+
+  const constraintsQuestion = byId.get("constraints");
+  if (constraintsQuestion) {
+    const requested = (constraintsQuestion.options || [])
+      .filter((option) => {
+        const value = String(option.value || option.label || "");
+        if (text.includes(value.toLowerCase())) return true;
+        if (value === "保留原文证据句" && /证据句|原文证据|证据原文/.test(text)) return true;
+        if (value === "证据原文" && /证据句|原文证据|证据原文/.test(text)) return true;
+        if (value === "输出前自检" && /自检|检查/.test(text)) return true;
+        if (value === "不确定时标记待确认" && /不确定|待确认/.test(text)) return true;
+        if (value === "不合并原因" && /不合并原因|不能合并|禁止合并/.test(text)) return true;
+        return false;
+      })
+      .map((option) => option.value);
+    if (requested.length >= 2) setAnswer("constraints", [...new Set(requested)], "原始需求已明确多个执行约束。");
+  }
+
+  return autoAnswers;
+}
+
 function getAnswerWithCustom(session, questionId, type) {
   const answer = session.answers[questionId];
   const customItems = parseCustomItems(session.customAnswers[questionId]);
@@ -1083,9 +1326,23 @@ function refreshSynonymQuestion(session) {
 }
 
 function shouldSkipQuestion(session, question) {
-  if (!question || question.id !== "synonym_groups") return false;
+  if (!question) return false;
+  if (session.autoAnswers?.[question.id]) return true;
+  if (question.id !== "synonym_groups") return false;
   refreshSynonymQuestion(session);
   return getAnswerWithCustom(session, "bilingual_synonym", "boolean") === "no" || !question.options.length;
+}
+
+function clearSkippedQuestionAnswer(session, question) {
+  if (!question || session.autoAnswers?.[question.id]) return;
+  session.answers[question.id] = question.type === "multi" ? [] : "";
+}
+
+function moveToFirstUnskippedQuestion(session) {
+  session.currentIndex = 0;
+  while (session.currentIndex < session.questions.length - 1 && shouldSkipQuestion(session, session.questions[session.currentIndex])) {
+    session.currentIndex += 1;
+  }
 }
 
 function getCurrentQuestion(session) {
@@ -1097,7 +1354,7 @@ function advanceToNextQuestion(session) {
   while (session.currentIndex < session.questions.length - 1) {
     session.currentIndex += 1;
     if (!shouldSkipQuestion(session, session.questions[session.currentIndex])) return;
-    session.answers[session.questions[session.currentIndex].id] = [];
+    clearSkippedQuestionAnswer(session, session.questions[session.currentIndex]);
   }
 }
 
@@ -1287,6 +1544,7 @@ function serializeSession(session) {
     workflowLabel: getWorkflowDefinition(session.workflow).label,
     sourceMode: session.sourceMode,
     model: session.model,
+    knowledge: session.knowledge,
     scenario: session.scenario,
     knowledgeProfile: session.knowledgeProfile,
     questionSource: session.questionSource,
@@ -1297,6 +1555,7 @@ function serializeSession(session) {
     questions: session.questions,
     answers: session.answers,
     customAnswers: session.customAnswers,
+    autoAnswers: session.autoAnswers,
     refinements: session.refinements,
     finalPrompt: session.finalPrompt,
     createdAt: session.createdAt,
@@ -1304,8 +1563,43 @@ function serializeSession(session) {
   };
 }
 
-function createOrchestrator({ callLLM, defaultModel }) {
+function createOrchestrator({ callLLM, defaultModel, storage }) {
   const sessions = new Map();
+  const store = storage || {};
+
+  function persistSession(session, eventType, detail = {}) {
+    const serialized = serializeSession(session);
+    if (typeof store.saveSession === "function") {
+      store.saveSession(serialized);
+    }
+    if (typeof store.appendAudit === "function") {
+      store.appendAudit({
+        type: eventType,
+        sessionId: session.id,
+        workflow: session.workflow,
+        sourceMode: session.sourceMode,
+        detail,
+      });
+    }
+    return serialized;
+  }
+
+  function requireSession(id) {
+    const memorySession = sessions.get(id);
+    if (memorySession) return memorySession;
+
+    if (typeof store.loadSession === "function") {
+      const loaded = store.loadSession(id);
+      if (loaded) {
+        sessions.set(id, loaded);
+        return loaded;
+      }
+    }
+
+    const error = new Error("session not found.");
+    error.statusCode = 404;
+    throw error;
+  }
 
   async function createSession(input) {
     const prompt = String(input.prompt || "").trim();
@@ -1369,6 +1663,11 @@ function createOrchestrator({ callLLM, defaultModel }) {
     }
 
     const now = new Date().toISOString();
+    const autoAnswers = inferAutoAnswers({ prompt, workflow, questions });
+    const answers = getDefaultAnswers(questions);
+    Object.entries(autoAnswers).forEach(([questionId, item]) => {
+      answers[questionId] = item.answer;
+    });
     const session = {
       id: crypto.randomUUID(),
       prompt,
@@ -1379,8 +1678,9 @@ function createOrchestrator({ callLLM, defaultModel }) {
       scenario,
       knowledgeProfile,
       questions,
-      answers: getDefaultAnswers(questions),
+      answers,
       customAnswers: getDefaultCustomAnswers(questions),
+      autoAnswers,
       currentIndex: 0,
       refinements: [],
       finalPrompt: "",
@@ -1389,27 +1689,18 @@ function createOrchestrator({ callLLM, defaultModel }) {
       createdAt: now,
       updatedAt: now,
     };
+    moveToFirstUnskippedQuestion(session);
     sessions.set(session.id, session);
-    return serializeSession(session);
+    return persistSession(session, "create_session", { questionMode, questionCount: session.questions.length });
   }
 
   function getSession(id) {
-    const session = sessions.get(id);
-    if (!session) {
-      const error = new Error("session not found.");
-      error.statusCode = 404;
-      throw error;
-    }
+    const session = requireSession(id);
     return serializeSession(session);
   }
 
   function submitAnswer(id, input) {
-    const session = sessions.get(id);
-    if (!session) {
-      const error = new Error("session not found.");
-      error.statusCode = 404;
-      throw error;
-    }
+    const session = requireSession(id);
     const question = getCurrentQuestion(session);
     const questionId = input.questionId || question?.id;
     if (!question || question.id !== questionId) {
@@ -1428,16 +1719,11 @@ function createOrchestrator({ callLLM, defaultModel }) {
     session.promptSource = { type: "本地模板", detail: "实时预览" };
     session.finalPrompt = "";
     session.updatedAt = new Date().toISOString();
-    return serializeSession(session);
+    return persistSession(session, "submit_answer", { questionId: question.id });
   }
 
   function navigateSession(id, input) {
-    const session = sessions.get(id);
-    if (!session) {
-      const error = new Error("session not found.");
-      error.statusCode = 404;
-      throw error;
-    }
+    const session = requireSession(id);
 
     if (input.direction === "previous") {
       moveToPreviousQuestion(session);
@@ -1457,16 +1743,11 @@ function createOrchestrator({ callLLM, defaultModel }) {
     session.finalPrompt = "";
     session.promptSource = { type: "本地模板", detail: "实时预览" };
     session.updatedAt = new Date().toISOString();
-    return serializeSession(session);
+    return persistSession(session, "navigate_session", { direction: input.direction || "", currentIndex: session.currentIndex });
   }
 
   async function finalizeSession(id, input = {}) {
-    const session = sessions.get(id);
-    if (!session) {
-      const error = new Error("session not found.");
-      error.statusCode = 404;
-      throw error;
-    }
+    const session = requireSession(id);
     const refinement = String(input.refinement || "").trim();
     if (refinement) session.refinements.push(refinement);
 
@@ -1508,12 +1789,34 @@ function createOrchestrator({ callLLM, defaultModel }) {
       session.promptSource = { type: "本地模板", detail: "后端规则归纳" };
     }
     session.updatedAt = new Date().toISOString();
-    return serializeSession(session);
+    const serialized = persistSession(session, "finalize_session", { promptMode, promptSource: session.promptSource });
+    if (typeof store.appendPromptVersion === "function") {
+      store.appendPromptVersion({
+        sessionId: session.id,
+        versionId: crypto.randomUUID(),
+        workflow: session.workflow,
+        sourceMode: session.sourceMode,
+        promptMode,
+        promptSource: session.promptSource,
+        prompt: session.prompt,
+        knowledge: session.knowledge,
+        knowledgeProfile: session.knowledgeProfile,
+        answers: session.answers,
+        customAnswers: session.customAnswers,
+        autoAnswers: session.autoAnswers,
+        refinements: session.refinements,
+        finalPrompt: session.finalPrompt,
+        createdAt: session.updatedAt,
+      });
+    }
+    return serialized;
   }
 
   return {
     createSession,
     getSession,
+    listSessions: () => (typeof store.listSessions === "function" ? store.listSessions() : [...sessions.values()].map(serializeSession)),
+    listPromptVersions: (sessionId) => (typeof store.listPromptVersions === "function" ? store.listPromptVersions(sessionId) : []),
     submitAnswer,
     navigateSession,
     finalizeSession,

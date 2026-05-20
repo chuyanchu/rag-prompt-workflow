@@ -501,12 +501,16 @@ const state = {
   refinements: [],
   previewFormat: "text",
   history: [],
+  uploadedDocuments: [],
+  promptVersions: [],
+  auditLogs: [],
   questionSource: "本地模板",
   questionSourceDetail: "尚未生成",
   promptSource: "本地模板",
   promptSourceDetail: "实时预览",
   llmConfigured: false,
   llmBusy: false,
+  uploadBusy: false,
   lastHealthCheckAt: 0,
 };
 
@@ -521,8 +525,14 @@ const elements = {
   knowledgeField: document.querySelector("#knowledgeField"),
   modeSwitch: document.querySelector("#modeSwitch"),
   modelSelect: document.querySelector("#modelSelect"),
+  llmConfigCard: document.querySelector("#llmConfigCard"),
   llmStatusTitle: document.querySelector("#llmStatusTitle"),
   llmStatusText: document.querySelector("#llmStatusText"),
+  llmBaseUrlInput: document.querySelector("#llmBaseUrlInput"),
+  llmApiKeyInput: document.querySelector("#llmApiKeyInput"),
+  rememberLlmConfigInput: document.querySelector("#rememberLlmConfigInput"),
+  saveLlmConfigBtn: document.querySelector("#saveLlmConfigBtn"),
+  llmConfigStatus: document.querySelector("#llmConfigStatus"),
   generateBtn: document.querySelector("#generateBtn"),
   llmGenerateBtn: document.querySelector("#llmGenerateBtn"),
   resetBtn: document.querySelector("#resetBtn"),
@@ -550,7 +560,15 @@ const elements = {
   knowledgeStatusText: document.querySelector("#knowledgeStatusText"),
   knowledgeSourceList: document.querySelector("#knowledgeSourceList"),
   refreshKnowledgeBtn: document.querySelector("#refreshKnowledgeBtn"),
+  knowledgeFileInput: document.querySelector("#knowledgeFileInput"),
+  knowledgeFileName: document.querySelector("#knowledgeFileName"),
+  uploadKnowledgeBtn: document.querySelector("#uploadKnowledgeBtn"),
+  uploadKnowledgeStatus: document.querySelector("#uploadKnowledgeStatus"),
+  uploadedDocumentList: document.querySelector("#uploadedDocumentList"),
   historyList: document.querySelector("#historyList"),
+  refreshSessionsBtn: document.querySelector("#refreshSessionsBtn"),
+  promptVersionList: document.querySelector("#promptVersionList"),
+  auditLogList: document.querySelector("#auditLogList"),
   previewFormatSwitch: document.querySelector("#previewFormatSwitch"),
   todayLabel: document.querySelector("#todayLabel"),
 };
@@ -580,6 +598,8 @@ function setLLMStatus(title, text, configured = false) {
   state.llmConfigured = configured;
   elements.llmStatusTitle.textContent = title;
   elements.llmStatusText.textContent = text;
+  elements.llmConfigCard.classList.toggle("is-connected", configured);
+  elements.llmConfigCard.classList.toggle("is-disconnected", !configured);
   setLLMBusy(false);
 }
 
@@ -600,6 +620,61 @@ function ensureModelOption(model) {
   }
   elements.modelSelect.value = model;
   state.model = model;
+}
+
+function syncLLMConfigForm(config) {
+  const llm = config?.llm || config || {};
+  if (llm.baseUrl) elements.llmBaseUrlInput.value = llm.baseUrl;
+  if (llm.model) ensureModelOption(llm.model);
+  if (llm.apiKeyPreview) {
+    elements.llmApiKeyInput.placeholder = `已配置 ${llm.apiKeyPreview}；留空保留`;
+  } else {
+    elements.llmApiKeyInput.placeholder = "留空则保留当前 Key";
+  }
+  elements.rememberLlmConfigInput.checked = Boolean(llm.saved);
+}
+
+async function loadLLMConfig() {
+  if (!isServerBackedPage()) return;
+  try {
+    const payload = await apiJson("/api/config");
+    syncLLMConfigForm(payload);
+  } catch (_error) {
+    elements.llmConfigStatus.textContent = "无法读取本机 API 设置";
+  }
+}
+
+async function saveLLMConfig() {
+  if (!isServerBackedPage()) {
+    elements.llmConfigStatus.textContent = "请通过 http://127.0.0.1:8080/ 打开后再保存";
+    return;
+  }
+
+  elements.saveLlmConfigBtn.disabled = true;
+  elements.saveLlmConfigBtn.textContent = "保存中";
+  elements.llmConfigStatus.textContent = "正在更新本机后端配置";
+  try {
+    const payload = await apiJson("/api/config/llm", {
+      method: "POST",
+      body: {
+        baseUrl: elements.llmBaseUrlInput.value.trim(),
+        model: elements.modelSelect.value.trim(),
+        apiKey: elements.llmApiKeyInput.value.trim(),
+        remember: elements.rememberLlmConfigInput.checked,
+      },
+    });
+    elements.llmApiKeyInput.value = "";
+    syncLLMConfigForm(payload);
+    elements.llmConfigStatus.textContent = payload.llm?.apiKeyConfigured
+      ? `已保存：${payload.llm.model} / ${payload.llm.baseUrl}`
+      : "已保存，但 API Key 仍未配置";
+    await checkLLMHealth(true);
+  } catch (error) {
+    elements.llmConfigStatus.textContent = error.message || "保存失败";
+  } finally {
+    elements.saveLlmConfigBtn.disabled = false;
+    elements.saveLlmConfigBtn.textContent = "保存 API 设置";
+  }
 }
 
 function getGenerationSourceText(kind) {
@@ -1489,7 +1564,7 @@ async function refreshKnowledgeStatus() {
       const readyCount = state.knowledgeSources.filter((source) => source.health === "ready").length;
       state.knowledgeStatusDetail = state.knowledgeAvailable
         ? `可用知识库：${readyCount}/${state.knowledgeSources.length || 0} 个`
-        : "Milvus 本地库尚未创建";
+        : "尚未检测到可用知识源";
     }
   } catch (_error) {
     state.knowledgeAvailable = false;
@@ -1557,6 +1632,136 @@ function renderKnowledgeSourceList() {
     .join("");
 }
 
+function renderUploadedDocuments() {
+  if (!elements.uploadedDocumentList) return;
+  if (!state.uploadedDocuments.length) {
+    elements.uploadedDocumentList.innerHTML = "";
+    return;
+  }
+  elements.uploadedDocumentList.innerHTML = state.uploadedDocuments
+    .slice(-5)
+    .reverse()
+    .map((document) => {
+      const milvusText = document.milvusStatus?.inserted
+        ? `Milvus ${document.milvusStatus.inserted} 条`
+        : document.milvusStatus?.error
+          ? "Milvus 失败，本地兜底"
+          : "待索引";
+      return `
+        <div class="document-item">
+          <span>
+            <strong>${escapeHtml(document.filename)}</strong>
+            <small>${Number(document.chunkCount || 0)} chunks · ${milvusText}</small>
+          </span>
+          <button class="icon-btn" type="button" data-delete-upload="${escapeHtml(document.id)}" title="删除文档">×</button>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function loadUploadedDocuments() {
+  if (!isServerBackedPage()) return;
+  const payload = await apiJson("/api/knowledge/uploads");
+  state.uploadedDocuments = Array.isArray(payload.documents) ? payload.documents : [];
+  renderUploadedDocuments();
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fileToUploadPayload(file) {
+  const textExtensions = /\.(txt|md|markdown|csv|json|log|html?|xml)$/i;
+  if (textExtensions.test(file.name)) {
+    return {
+      filename: file.name,
+      mimeType: file.type || "text/plain",
+      content: await file.text(),
+    };
+  }
+  return {
+    filename: file.name,
+    mimeType: file.type || "application/octet-stream",
+    dataBase64: await blobToBase64(file),
+  };
+}
+
+async function uploadKnowledgeFiles() {
+  const files = [...(elements.knowledgeFileInput?.files || [])];
+  if (!files.length) {
+    elements.uploadKnowledgeStatus.textContent = "请先选择一个文本文件";
+    return;
+  }
+  if (!isServerBackedPage()) {
+    elements.uploadKnowledgeStatus.textContent = "请通过 http://127.0.0.1:8080/ 打开后再上传";
+    return;
+  }
+
+  state.uploadBusy = true;
+  elements.uploadKnowledgeBtn.disabled = true;
+  elements.uploadKnowledgeBtn.textContent = "上传中";
+  elements.uploadKnowledgeStatus.textContent = `正在处理 ${files.length} 个文件`;
+
+  try {
+    const payload = {
+      files: await Promise.all(
+        files.map((file) => fileToUploadPayload(file))
+      ),
+    };
+    const result = await apiJson("/api/knowledge/uploads", {
+      method: "POST",
+      body: payload,
+    });
+    const uploaded = result.uploaded || [];
+    elements.uploadKnowledgeStatus.textContent = uploaded.length
+      ? `已上传 ${uploaded.length} 个文件，生成 ${uploaded.reduce((sum, item) => sum + Number(item.chunkCount || 0), 0)} 个向量片段`
+      : "没有生成可检索片段";
+    elements.knowledgeFileInput.value = "";
+    elements.knowledgeFileName.textContent = "未选择文件";
+    await refreshKnowledgeStatus();
+    await loadUploadedDocuments();
+    await loadAuditLogs();
+    state.selectedKnowledgeSourceIds = [...new Set([...state.selectedKnowledgeSourceIds, "uploaded_documents"])];
+    state.mode = "rag";
+    elements.knowledgeField.classList.remove("hidden");
+    [...elements.modeSwitch.querySelectorAll(".mode-btn")].forEach((item) =>
+      item.classList.toggle("active", item.dataset.mode === "rag")
+    );
+    renderKnowledgeSourceList();
+    updateTopStatus();
+  } catch (error) {
+    elements.uploadKnowledgeStatus.textContent = error.message || "上传失败";
+  } finally {
+    state.uploadBusy = false;
+    elements.uploadKnowledgeBtn.disabled = false;
+    elements.uploadKnowledgeBtn.textContent = "上传文档";
+  }
+}
+
+function updateSelectedFileName() {
+  const files = [...(elements.knowledgeFileInput?.files || [])];
+  if (!files.length) {
+    elements.knowledgeFileName.textContent = "未选择文件";
+    return;
+  }
+  elements.knowledgeFileName.textContent =
+    files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`;
+}
+
+async function deleteUploadedDocument(documentId) {
+  if (!documentId || !isServerBackedPage()) return;
+  await apiJson(`/api/knowledge/uploads/${encodeURIComponent(documentId)}`, { method: "DELETE" });
+  await loadUploadedDocuments();
+  await refreshKnowledgeStatus();
+  await loadAuditLogs();
+}
+
 async function hydrateKnowledgeFromMilvus() {
   if (state.mode !== "rag") {
     state.retrievedKnowledge = [];
@@ -1571,7 +1776,7 @@ async function hydrateKnowledgeFromMilvus() {
   }
 
   state.manualKnowledge = elements.knowledgeInput.value.trim();
-  elements.stageLabel.textContent = "正在检索 Milvus 知识库";
+  elements.stageLabel.textContent = "正在检索 RAG 知识库";
   elements.stageDesc.textContent = `系统会从 ${selectedSources.map((source) => source.label).join("、")} 中召回知识片段。`;
   const payload = await apiJson("/api/knowledge/search", {
     method: "POST",
@@ -1600,6 +1805,7 @@ function syncFromOrchestratorSession(session) {
   state.prompt = session.prompt || state.prompt;
   state.mode = session.sourceMode || state.mode;
   state.model = session.model || state.model;
+  state.knowledge = session.knowledge || state.knowledge;
   state.knowledgeProfile = session.knowledgeProfile || null;
   state.scenario = session.scenario || null;
   state.questions = session.questions || [];
@@ -1612,6 +1818,13 @@ function syncFromOrchestratorSession(session) {
   state.questionSourceDetail = session.questionSource?.detail || "Orchestrator";
   state.promptSource = session.promptSource?.type || "本地模板";
   state.promptSourceDetail = session.promptSource?.detail || "实时预览";
+
+  elements.promptInput.value = state.prompt;
+  elements.knowledgeInput.value = state.knowledge;
+  elements.knowledgeField.classList.toggle("hidden", state.mode !== "rag");
+  [...elements.modeSwitch.querySelectorAll(".mode-btn")].forEach((item) =>
+    item.classList.toggle("active", item.dataset.mode === state.mode)
+  );
 
   elements.emptyState.classList.add("hidden");
   elements.questionnaire.classList.remove("hidden");
@@ -1636,6 +1849,7 @@ async function createBackendSession(questionMode) {
     },
   });
   syncFromOrchestratorSession(session);
+  await loadPersistedSessions();
   return session;
 }
 
@@ -1865,10 +2079,85 @@ function renderHistory() {
         <div class="history-item">
           <strong>${escapeHtml(item.title)}</strong><br />
           <span>${escapeHtml(item.subtitle)}</span>
+          ${item.sessionId ? `<br /><button class="mini-btn" type="button" data-load-session="${escapeHtml(item.sessionId)}">恢复</button>` : ""}
         </div>
       `
     )
     .join("");
+}
+
+function renderPromptVersions() {
+  if (!elements.promptVersionList) return;
+  if (!state.promptVersions.length) {
+    elements.promptVersionList.innerHTML = `<div class="history-item muted">尚未生成版本</div>`;
+    return;
+  }
+  elements.promptVersionList.innerHTML = state.promptVersions
+    .slice(0, 4)
+    .map(
+      (version) => `
+        <div class="history-item">
+          <strong>${escapeHtml(version.promptSource?.type || version.promptMode || "版本")}</strong><br />
+          <span>${escapeHtml(formatKnowledgeTime(version.createdAt))} · ${escapeHtml(version.workflow || "")}</span>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function renderAuditLogs() {
+  if (!elements.auditLogList) return;
+  if (!state.auditLogs.length) {
+    elements.auditLogList.innerHTML = `<div class="history-item muted">暂无审计事件</div>`;
+    return;
+  }
+  elements.auditLogList.innerHTML = state.auditLogs
+    .slice(0, 5)
+    .map(
+      (event) => `
+        <div class="history-item">
+          <strong>${escapeHtml(event.type)}</strong><br />
+          <span>${escapeHtml(formatKnowledgeTime(event.createdAt))}</span>
+        </div>
+      `
+    )
+    .join("");
+}
+
+async function loadPersistedSessions() {
+  if (!isServerBackedPage()) return;
+  const payload = await apiJson("/api/orchestrator/sessions");
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  state.history = sessions.map((session) => ({
+    sessionId: session.id,
+    title: session.prompt || "未命名会话",
+    subtitle: `${session.workflow || "workflow"} / ${session.scenario?.label || "未识别"} / ${formatKnowledgeTime(session.updatedAt)}`,
+  }));
+  renderHistory();
+}
+
+async function loadPromptVersions(sessionId = state.orchestratorSessionId) {
+  if (!sessionId || !isServerBackedPage()) {
+    state.promptVersions = [];
+    renderPromptVersions();
+    return;
+  }
+  const payload = await apiJson(`/api/orchestrator/sessions/${encodeURIComponent(sessionId)}/prompt-versions`);
+  state.promptVersions = Array.isArray(payload.versions) ? payload.versions : [];
+  renderPromptVersions();
+}
+
+async function loadAuditLogs() {
+  if (!isServerBackedPage()) return;
+  const payload = await apiJson("/api/knowledge/audit-logs?limit=5");
+  state.auditLogs = Array.isArray(payload.events) ? payload.events : [];
+  renderAuditLogs();
+}
+
+async function restoreSession(sessionId) {
+  const session = await apiJson(`/api/orchestrator/sessions/${encodeURIComponent(sessionId)}`);
+  syncFromOrchestratorSession(session);
+  await loadPromptVersions(sessionId);
 }
 
 function renderQuestion() {
@@ -2271,7 +2560,7 @@ function updateSummaryCards() {
 }
 
 function updateTopStatus() {
-  const sourceLabel = state.mode === "rag" ? state.knowledgeProfile?.sourceLabel || "Milvus 知识库" : "通用模板";
+  const sourceLabel = state.mode === "rag" ? state.knowledgeProfile?.sourceLabel || "RAG 知识库" : "通用模板";
   const selectedSources = getSelectedKnowledgeSources();
   const selectedSourceText = selectedSources.length ? selectedSources.map((source) => source.label).join("、") : "未选择知识库";
   const readyCount = state.knowledgeSources.filter((source) => source.health === "ready").length;
@@ -2281,15 +2570,15 @@ function updateTopStatus() {
   elements.scenarioBadge.textContent = state.scenario ? state.scenario.label : "等待识别场景";
   if (state.mode === "rag") {
     elements.knowledgeStatusTitle.textContent = state.retrievedKnowledge.length
-      ? "当前使用 Milvus 知识库"
-      : "等待检索 Milvus 知识库";
+      ? "当前使用 RAG 知识库"
+      : "等待检索 RAG 知识库";
     elements.knowledgeStatusText.textContent = state.retrievedKnowledge.length
       ? `已从 ${selectedSourceText} 召回 ${state.retrievedKnowledge.length} 条知识片段。`
       : state.knowledgeAvailable
-        ? `可用知识库 ${readyCount}/${state.knowledgeSources.length}；生成问答时会从已选知识库召回片段：${selectedSourceText}${statusSuffix}。`
-        : "尚未检测到 Milvus 本地知识库。";
+      ? `可用知识库 ${readyCount}/${state.knowledgeSources.length}；生成问答时会从已选知识库召回片段：${selectedSourceText}${statusSuffix}。`
+        : "尚未检测到可用知识源。";
   } else {
-    elements.knowledgeStatusTitle.textContent = state.knowledgeAvailable ? "Milvus 知识库已接入" : "当前使用通用模板";
+    elements.knowledgeStatusTitle.textContent = state.knowledgeAvailable ? "RAG 知识库已接入" : "当前使用通用模板";
     elements.knowledgeStatusText.textContent = state.knowledgeAvailable
       ? `当前任务使用通用模板；可用知识库 ${readyCount}/${state.knowledgeSources.length}${statusSuffix}。`
       : state.knowledgeStatusDetail && state.knowledgeStatusDetail !== "尚未检测"
@@ -2298,9 +2587,9 @@ function updateTopStatus() {
   }
 }
 
-async function checkLLMHealth() {
+async function checkLLMHealth(force = false) {
   const now = Date.now();
-  if (state.llmBusy || now - state.lastHealthCheckAt < 1200) {
+  if (!force && (state.llmBusy || now - state.lastHealthCheckAt < 1200)) {
     return;
   }
   state.lastHealthCheckAt = now;
@@ -2311,8 +2600,9 @@ async function checkLLMHealth() {
       throw new Error("health check failed");
     }
     const payload = await response.json();
+    if (payload.baseUrl) elements.llmBaseUrlInput.value = payload.baseUrl;
     if (!payload.llmConfigured) {
-      setLLMStatus("后端已启动，LLM 未配置", "请设置 LLM_API_KEY 后重启 server.js。", false);
+      setLLMStatus("后端已启动，LLM 未配置", "可在这里填写 OpenAI-compatible API 设置，无需重启。", false);
       if (payload.model) {
         ensureModelOption(payload.model);
       }
@@ -2320,7 +2610,13 @@ async function checkLLMHealth() {
     }
 
     ensureModelOption(payload.model);
-    setLLMStatus("LLM 已连接", `模型：${payload.model}；接口：${payload.baseUrl}`, true);
+    let endpointLabel = payload.baseUrl || "";
+    try {
+      endpointLabel = new URL(payload.baseUrl).host;
+    } catch (_error) {
+      endpointLabel = payload.baseUrl || "";
+    }
+    setLLMStatus("LLM 已连接", `${payload.model} · ${endpointLabel}`, true);
   } catch (error) {
     setLLMStatus("未启动 LLM 后端", "直接打开 HTML 时使用本地模板；真实调用请用 node server.js 启动。", false);
   }
@@ -2407,6 +2703,9 @@ async function regenerateFinalPrompt() {
         body: { promptMode: "local" },
       });
       syncFromOrchestratorSession(session);
+      await loadPromptVersions(session.id);
+      await loadPersistedSessions();
+      await loadAuditLogs();
       elements.stageLabel.textContent = "后端已归纳提示词，可继续追问修改";
       elements.stageDesc.textContent = "最终提示词由后端 Orchestrator 规则生成，未调用 LLM。";
       elements.previewStageLabel.textContent = "后端已生成";
@@ -2448,6 +2747,9 @@ async function regenerateFinalPromptWithLLM() {
         body: { promptMode: "llm", model: state.model },
       });
       syncFromOrchestratorSession(session);
+      await loadPromptVersions(session.id);
+      await loadPersistedSessions();
+      await loadAuditLogs();
       elements.stageLabel.textContent = "后端 LLM 已归纳提示词，可继续追问修改";
       elements.stageDesc.textContent = "最终提示词由后端 Orchestrator 调用 LLM 生成。";
       elements.previewStageLabel.textContent = "后端 LLM 已生成";
@@ -2649,6 +2951,9 @@ async function applyRefinement() {
         body: { promptMode: "local", refinement },
       });
       syncFromOrchestratorSession(session);
+      await loadPromptVersions(session.id);
+      await loadPersistedSessions();
+      await loadAuditLogs();
       elements.refineInput.value = "";
       elements.stageLabel.textContent = "后端已应用修改意见";
       elements.stageDesc.textContent = "修改意见已记录在后端会话，并使用后端规则重新归纳提示词，未调用 LLM。";
@@ -2712,6 +3017,7 @@ function resetApp() {
   state.finalPrompt = "";
   state.refinements = [];
   state.previewFormat = "text";
+  state.promptVersions = [];
   state.questionSource = "本地模板";
   state.questionSourceDetail = "尚未生成";
   state.promptSource = "本地模板";
@@ -2743,6 +3049,7 @@ function resetApp() {
   renderStepList();
   renderPreview();
   renderHistory();
+  renderPromptVersions();
   setLLMBusy(false);
 }
 
@@ -2808,6 +3115,34 @@ elements.refreshKnowledgeBtn.addEventListener("click", () => {
   refreshKnowledgeStatus();
 });
 
+elements.uploadKnowledgeBtn.addEventListener("click", () => {
+  uploadKnowledgeFiles();
+});
+
+elements.knowledgeFileInput.addEventListener("change", updateSelectedFileName);
+
+elements.uploadedDocumentList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-delete-upload]");
+  if (!button) return;
+  deleteUploadedDocument(button.dataset.deleteUpload).catch((error) => {
+    window.alert(`删除上传文档失败。\n${error.message}`);
+  });
+});
+
+elements.refreshSessionsBtn.addEventListener("click", () => {
+  loadPersistedSessions();
+  loadPromptVersions();
+  loadAuditLogs();
+});
+
+elements.historyList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-load-session]");
+  if (!button) return;
+  restoreSession(button.dataset.loadSession).catch((error) => {
+    window.alert(`恢复会话失败。\n${error.message}`);
+  });
+});
+
 elements.previewFormatSwitch.addEventListener("click", (event) => {
   const button = event.target.closest(".format-btn");
   if (!button) {
@@ -2823,6 +3158,10 @@ elements.previewFormatSwitch.addEventListener("click", (event) => {
 elements.modelSelect.addEventListener("change", () => {
   state.model = elements.modelSelect.value;
   renderPreview();
+});
+
+elements.saveLlmConfigBtn.addEventListener("click", () => {
+  saveLLMConfig();
 });
 
 elements.questionCard.addEventListener("input", () => {
@@ -2871,7 +3210,11 @@ elements.todayLabel.textContent = new Date().toLocaleDateString("zh-CN", {
 
 resetApp();
 checkLLMHealth();
+loadLLMConfig();
 refreshKnowledgeStatus();
+loadUploadedDocuments();
+loadPersistedSessions();
+loadAuditLogs();
 window.addEventListener("focus", checkLLMHealth);
 window.addEventListener("pageshow", checkLLMHealth);
 document.addEventListener("visibilitychange", () => {
